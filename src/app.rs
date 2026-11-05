@@ -156,7 +156,10 @@ impl App {
         }
         match self.player.tick() {
             Some(true) => self.next(),
-            Some(false) => self.status = "playback failed — are mpv and yt-dlp installed?".into(),
+            Some(false) => {
+                self.status =
+                    "playback failed — track unavailable, or mpv/yt-dlp missing (n = next)".into()
+            }
             None => {}
         }
     }
