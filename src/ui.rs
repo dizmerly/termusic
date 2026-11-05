@@ -51,20 +51,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             theme::ORANGE,
         ),
         Screen::Login => {
-            let lines = match &app.login_code {
-                Some((url, code)) => vec![
-                    Line::raw("Open this page on any device:"),
+            let lines = match &app.login_url {
+                Some(url) => vec![
+                    Line::raw("Your browser should open. If not, visit:"),
                     Line::styled(url.clone(), fg(theme::CYAN).underlined()),
-                    Line::raw("and enter the code:"),
-                    Line::styled(code.clone(), fg(theme::YELLOW).bold()),
+                    Line::styled("Waiting for you to sign in…", fg(theme::YELLOW)),
                 ],
                 None => vec![
-                    Line::styled("Sign in with Google", fg(theme::GREEN).bold()),
+                    Line::styled(
+                        "Sign in with Google to see your playlists",
+                        fg(theme::GREEN).bold(),
+                    ),
                     Line::from(vec![
                         Span::styled("Enter", theme::title()),
-                        Span::raw(" start   "),
-                        Span::styled("?", theme::title()),
-                        Span::raw(" help   "),
+                        Span::raw(" sign in   "),
+                        Span::styled("Esc", theme::title()),
+                        Span::raw(" back to search   "),
                         Span::styled("q", theme::title()),
                         Span::raw(" quit"),
                     ]),

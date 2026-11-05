@@ -11,7 +11,7 @@ pub enum Msg {
     Online,
     Offline,
     Err(String),
-    Code { url: String, code: String },
+    LoginUrl(String),
     LoggedIn,
     Tracks(Vec<Track>),
     Playlists(Vec<Track>),
@@ -34,8 +34,8 @@ pub struct App {
     pub input: String,
     pub results: Vec<Track>,
     pub playlists: Vec<Track>,
-    /// Device-flow (url, code) while waiting for the user to authorize.
-    pub login_code: Option<(String, String)>,
+    /// Authorization page while waiting for the user to sign in.
+    pub login_url: Option<String>,
     /// A network task is in flight.
     pub busy: bool,
     tx: UnboundedSender<Msg>,
@@ -52,17 +52,16 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        let screen = if !net::is_online() {
-            Screen::Offline
-        } else if auth::is_logged_in() {
+        // Login is optional (only playlists need it), so we always start at Search.
+        let screen = if net::is_online() {
             Screen::Search
         } else {
-            Screen::Login
+            Screen::Offline
         };
         let (tx, rx) = unbounded_channel();
         Self {
             playlists: Vec::new(),
-            login_code: None,
+            login_url: None,
             busy: false,
             tx,
             rx,
@@ -104,11 +103,8 @@ impl App {
     fn start_login(&mut self) {
         let tx = self.tx.clone();
         self.spawn(async move {
-            auth::login(|url, code| {
-                let _ = tx.send(Msg::Code {
-                    url: url.into(),
-                    code: code.into(),
-                });
+            auth::login(|url| {
+                let _ = tx.send(Msg::LoginUrl(url.into()));
             })
             .await?;
             Ok(Msg::LoggedIn)
@@ -116,6 +112,10 @@ impl App {
     }
 
     fn open_playlists(&mut self) {
+        if !auth::is_logged_in() {
+            self.screen = Screen::Login;
+            return;
+        }
         self.screen = Screen::Playlists;
         self.select(0);
         self.spawn(async { Ok(Msg::Playlists(youtube::playlists().await?)) });
@@ -124,7 +124,7 @@ impl App {
     /// Apply finished background work and detect the end of the current track. Called every frame.
     pub fn tick(&mut self) {
         while let Ok(m) = self.rx.try_recv() {
-            if !matches!(m, Msg::Code { .. }) {
+            if !matches!(m, Msg::LoginUrl(_)) {
                 self.busy = false;
             }
             match m {
@@ -138,16 +138,13 @@ impl App {
                 Msg::Offline => self.screen = Screen::Offline,
                 Msg::Err(e) => {
                     self.status = e;
-                    if !auth::is_logged_in() {
-                        self.login_code = None;
-                        self.screen = Screen::Login;
-                    }
+                    self.login_url = None;
                 }
-                Msg::Code { url, code } => self.login_code = Some((url, code)),
+                Msg::LoginUrl(u) => self.login_url = Some(u),
                 Msg::LoggedIn => {
-                    self.login_code = None;
-                    self.screen = Screen::Search;
+                    self.login_url = None;
                     self.status = "signed in".into();
+                    self.open_playlists();
                 }
                 Msg::Tracks(v) => {
                     self.status = if v.is_empty() {
@@ -220,6 +217,7 @@ impl App {
             },
             Screen::Login => match key.code {
                 KeyCode::Enter if !self.busy => self.start_login(),
+                KeyCode::Esc => self.screen = Screen::Search,
                 KeyCode::Char('q') => self.quit = true,
                 KeyCode::Char('?') => self.open_help(),
                 _ => {}

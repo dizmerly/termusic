@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         None => run_tui(),
         Some(Cmd::Login) => {
-            auth::login(|url, code| println!("Open {url} and enter code {code}")).await?;
+            auth::login(|url| println!("Open this page to sign in:\n{url}")).await?;
             println!("logged in");
             Ok(())
         }

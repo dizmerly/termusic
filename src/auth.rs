@@ -1,11 +1,10 @@
-//! Google OAuth 2.0 device-code flow; tokens persisted in the user config dir.
+//! Google OAuth 2.0 (loopback redirect); tokens persisted in the user config dir.
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{path::PathBuf, time::Duration};
 
 const SCOPE: &str = "https://www.googleapis.com/auth/youtube.readonly";
-const DEVICE_URL: &str = "https://oauth2.googleapis.com/device/code";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -33,9 +32,30 @@ pub fn logout() -> Result<()> {
     Ok(())
 }
 
+/// Env vars win; otherwise Google's downloaded `client_secret.json` in the config dir.
 fn creds() -> Result<(String, String)> {
-    let var = |k| std::env::var(k).with_context(|| format!("set {k} (Google OAuth client)"));
-    Ok((var("TERMUSIC_CLIENT_ID")?, var("TERMUSIC_CLIENT_SECRET")?))
+    if let (Ok(i), Ok(s)) = (
+        std::env::var("TERMUSIC_CLIENT_ID"),
+        std::env::var("TERMUSIC_CLIENT_SECRET"),
+    ) {
+        return Ok((i, s));
+    }
+    let p = token_path()
+        .context("no config dir")?
+        .with_file_name("client_secret.json");
+    let v: Value = serde_json::from_slice(&std::fs::read(&p).with_context(|| {
+        format!(
+            "set TERMUSIC_CLIENT_ID/SECRET or save Google's client JSON to {}",
+            p.display()
+        )
+    })?)?;
+    let c = &v["installed"];
+    let f = |k: &str| {
+        c[k].as_str()
+            .map(str::to_owned)
+            .context("bad client_secret.json")
+    };
+    Ok((f("client_id")?, f("client_secret")?))
 }
 
 fn now() -> u64 {
@@ -80,49 +100,84 @@ async fn post(form: &[(&str, &str)]) -> Result<Value> {
         .await?)
 }
 
-/// Run the device flow; `on_code(url, user_code)` tells the user where to authorize.
-pub async fn login(on_code: impl Fn(&str, &str)) -> Result<()> {
-    let (id, secret) = creds()?;
-    let d: Value = reqwest::Client::new()
-        .post(DEVICE_URL)
-        .form(&[("client_id", id.as_str()), ("scope", SCOPE)])
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let field = |k: &str| {
-        d[k].as_str()
-            .map(str::to_owned)
-            .context("bad device response")
+/// The `code` from the browser's redirect request line, if this request carries one.
+fn code_from_request(req: &str, state: &str) -> Result<Option<String>> {
+    let path = req.split_whitespace().nth(1).unwrap_or("/");
+    let url = reqwest::Url::parse(&format!("http://localhost{path}"))?;
+    let q = |k: &str| {
+        url.query_pairs()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.into_owned())
     };
-    let (device, url, code) = (
-        field("device_code")?,
-        field("verification_url")?,
-        field("user_code")?,
-    );
-    on_code(&url, &code);
-    let mut interval = d["interval"].as_u64().unwrap_or(5);
-    let deadline = now() + d["expires_in"].as_u64().unwrap_or(600);
-    while now() < deadline {
-        tokio::time::sleep(Duration::from_secs(interval)).await;
-        let r = post(&[
-            ("client_id", &id),
-            ("client_secret", &secret),
-            ("device_code", &device),
-            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-        ])
-        .await?;
-        if let Some(t) = parse(&r, "") {
-            return save(&t);
-        }
-        match r["error"].as_str() {
-            Some("authorization_pending") => {}
-            Some("slow_down") => interval += 5,
-            e => bail!("login failed: {}", e.unwrap_or("unknown")),
-        }
+    if let Some(e) = q("error") {
+        bail!("login failed: {e}");
     }
-    bail!("login timed out")
+    match q("code") {
+        Some(c) if q("state").as_deref() == Some(state) => Ok(Some(c)),
+        Some(_) => bail!("login failed: state mismatch"),
+        None => Ok(None), // e.g. /favicon.ico
+    }
+}
+
+/// Loopback-redirect flow (Desktop-app clients). `on_url` receives the page to open;
+/// we also try to open it in the browser. shortcut: no PKCE, add it if the client secret is ever shipped publicly.
+pub async fn login(on_url: impl Fn(&str)) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (id, secret) = creds()?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let redirect = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
+    let state = now().to_string() + &std::process::id().to_string();
+    let url = reqwest::Url::parse_with_params(
+        "https://accounts.google.com/o/oauth2/v2/auth",
+        [
+            ("client_id", id.as_str()),
+            ("redirect_uri", &redirect),
+            ("response_type", "code"),
+            ("scope", SCOPE),
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+            ("state", &state),
+        ],
+    )?;
+    on_url(url.as_str());
+    let _ = std::process::Command::new(if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    })
+    .arg(url.as_str())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .spawn();
+    let code = tokio::time::timeout(Duration::from_secs(300), async {
+        loop {
+            let (mut sock, _) = listener.accept().await?;
+            let mut buf = [0u8; 4096];
+            let n = sock.read(&mut buf).await?;
+            let found = code_from_request(&String::from_utf8_lossy(&buf[..n]), &state);
+            let body = if matches!(found, Ok(Some(_))) { "Signed in to termusic. You can close this tab." } else { "termusic" };
+            let _ = sock
+                .write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}").as_bytes())
+                .await;
+            if let Some(c) = found? {
+                return Ok::<_, anyhow::Error>(c);
+            }
+        }
+    })
+    .await
+    .context("login timed out")??;
+    let r = post(&[
+        ("code", &code),
+        ("client_id", &id),
+        ("client_secret", &secret),
+        ("redirect_uri", &redirect),
+        ("grant_type", "authorization_code"),
+    ])
+    .await?;
+    match parse(&r, "") {
+        Some(t) => save(&t),
+        None => bail!("login failed: {}", r["error"].as_str().unwrap_or("unknown")),
+    }
 }
 
 /// A valid access token, refreshing (and persisting) it when expired.
@@ -162,5 +217,17 @@ mod tests {
             ("a", "old")
         );
         assert!(parse(&serde_json::json!({"error": "x"}), "old").is_none());
+    }
+
+    #[test]
+    fn redirect_parsing() {
+        let ok = code_from_request("GET /?state=s&code=4%2Fabc HTTP/1.1", "s").unwrap();
+        assert_eq!(ok.as_deref(), Some("4/abc"));
+        assert_eq!(
+            code_from_request("GET /favicon.ico HTTP/1.1", "s").unwrap(),
+            None
+        );
+        assert!(code_from_request("GET /?code=x&state=bad HTTP/1.1", "s").is_err());
+        assert!(code_from_request("GET /?error=access_denied HTTP/1.1", "s").is_err());
     }
 }
