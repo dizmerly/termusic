@@ -24,3 +24,4 @@ Opus plans/reviews only. Implementation by Sonnet agents (Haiku for trivial task
 - Iter 4 (done): help screen gets all rows (logo hidden; two lines still clipped until iter 5), Esc on Search returns to results, yt-dlp search timeout (30s, killed on drop), random OAuth state, `play` description fixed, key-handling tests.
 - Iter 4 judge: 7.5/10 (help still clipped, long titles hid the channel).
 - Iter 5 (done): shortened help text, titles truncated so channel stays visible, ♪ marks the playing row, logo hidden under 20 rows, TestBackend render tests (help 80x24, tiny terminal no panic).
+- Iter 5 judge: 8.5/10. Open: playing marker compares titles not ids; Help clips below 24 rows; no PKCE; auto-advance/shuffle untested; nav keys in help are hand-written.
