@@ -21,6 +21,16 @@ fn sock() -> PathBuf {
     std::env::temp_dir().join(format!("termusic-mpv-{}.sock", std::process::id()))
 }
 
+/// Startup check: a hint if mpv or yt-dlp can't be run.
+pub fn missing_deps() -> Option<String> {
+    let missing: Vec<_> = ["mpv", "yt-dlp"]
+        .into_iter()
+        .filter(|b| Command::new(b).arg("--version").output().is_err())
+        .collect();
+    (!missing.is_empty())
+        .then(|| format!("missing {} — install to play music", missing.join(" + ")))
+}
+
 impl Player {
     pub fn play(&mut self, t: &Track) -> Result<()> {
         self.stop();

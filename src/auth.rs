@@ -71,12 +71,11 @@ fn load() -> Option<Tokens> {
 fn save(t: &Tokens) -> Result<()> {
     let p = token_path().context("no config dir")?;
     std::fs::create_dir_all(p.parent().context("bad path")?)?;
-    std::fs::write(&p, serde_json::to_vec(t)?)?;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
-    }
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600); // never world-readable, even briefly
+    std::io::Write::write_all(&mut o.open(&p)?, &serde_json::to_vec(t)?)?;
     Ok(())
 }
 

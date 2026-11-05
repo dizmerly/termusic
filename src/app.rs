@@ -1,4 +1,5 @@
 //! Application state and key handling.
+use crate::commands;
 use crate::player::Player;
 use crate::youtube::{self, Track};
 use crate::{auth, net};
@@ -73,7 +74,7 @@ impl App {
             offset: 0,
             page: 10,
             player: Player::default(),
-            status: String::new(),
+            status: crate::player::missing_deps().unwrap_or_default(),
             quit: false,
         }
     }
@@ -128,13 +129,7 @@ impl App {
                 self.busy = false;
             }
             match m {
-                Msg::Online => {
-                    self.screen = if auth::is_logged_in() {
-                        Screen::Search
-                    } else {
-                        Screen::Login
-                    }
-                }
+                Msg::Online => self.screen = Screen::Search,
                 Msg::Offline => self.screen = Screen::Offline,
                 Msg::Err(e) => {
                     self.status = e;
@@ -237,6 +232,11 @@ impl App {
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(c) = key.code
+            && commands::disabled(c)
+        {
+            return;
+        }
         let last = self.len().saturating_sub(1);
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.select(self.selected.saturating_add(1)),
@@ -314,5 +314,31 @@ mod tests {
         assert_eq!(a.offset, 25);
         a.select(0);
         assert_eq!((a.selected, a.offset), (0, 0));
+    }
+
+    #[test]
+    fn messages_drive_screens() {
+        let mut a = App::new();
+        a.tx.send(Msg::Offline).unwrap();
+        a.tick();
+        assert_eq!(a.screen, Screen::Offline);
+        a.tx.send(Msg::Online).unwrap();
+        a.tick();
+        assert_eq!(a.screen, Screen::Search); // guests are never forced to log in
+        a.tx.send(Msg::Tracks(Vec::new())).unwrap();
+        a.tick();
+        assert_eq!(
+            (a.screen, a.status.as_str()),
+            (Screen::Results, "no results")
+        );
+    }
+
+    #[test]
+    fn next_stops_at_end_of_list() {
+        let mut a = app();
+        a.select(29);
+        a.next();
+        assert_eq!(a.selected, 29);
+        assert!(a.player.now_playing.is_none());
     }
 }

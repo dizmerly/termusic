@@ -10,17 +10,12 @@ A text-only terminal YouTube Music player written in Rust with [Ratatui](https:/
 brew install mpv yt-dlp        # macOS; use your package manager elsewhere
 ```
 
-**2. Create a Google OAuth client**
+**2. (Optional) Set up Google sign-in** — only needed to see your own playlists. Search and playback work without any account.
 
 In the [Google Cloud console](https://console.cloud.google.com/apis/credentials):
 1. Enable the **YouTube Data API v3** for your project.
-2. Create credentials → **OAuth client ID** → application type **TVs and Limited Input devices**.
-3. Export the values:
-
-```sh
-export TERMUSIC_CLIENT_ID=...
-export TERMUSIC_CLIENT_SECRET=...
-```
+2. Create credentials → **OAuth client ID** → application type **Desktop app**, and add yourself as a test user on the consent screen.
+3. Either download the JSON and save it as `client_secret.json` in termusic's config dir (`~/Library/Application Support/termusic/` on macOS, `~/.config/termusic/` on Linux), or export `TERMUSIC_CLIENT_ID` and `TERMUSIC_CLIENT_SECRET`.
 
 **3. Run**
 
@@ -28,21 +23,22 @@ export TERMUSIC_CLIENT_SECRET=...
 cargo run
 ```
 
-On first launch choose **Enter** on the login screen. termusic shows a URL and a code: open the URL on any device, enter the code, and the app continues on its own. Then type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track to play it.
+Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track to play it. To use playlists, press `P` and choose **Enter** to sign in: your browser opens, you approve, and the app continues on its own.
 
 ## Behavior
 
 ### Startup
 1. Checks connectivity. If offline, shows the **Offline** screen (`r` retries, `q` quits).
-2. If no saved login exists, shows the **Login** screen; otherwise goes to **Search**.
+2. Otherwise goes straight to **Search**; signing in is optional.
+3. If `mpv` or `yt-dlp` can't be run, the status bar says which is missing.
 
 ### Screens
 | Screen | What it does |
 |--------|--------------|
-| Login | Google device-code sign-in. Shows the verification URL and code while waiting. |
-| Search | Text prompt. `Enter` runs the query and shows the top 30 results. `Esc` quits. |
+| Login | Optional Google sign-in (opened with `P` when signed out). Opens your browser; shows the URL while waiting. `Esc` goes back. |
+| Search | Text prompt. `Enter` runs the query (via `yt-dlp`, no account needed) and shows the top 30 results. `Esc` quits. |
 | Results | Scrollable list of tracks (title and channel). Text only, no thumbnails. |
-| Playlists | Your YouTube playlists. `Enter` opens one as a track list. |
+| Playlists | Your YouTube playlists (needs sign-in). `Enter` opens one (first 50 tracks). |
 | Help | Lists every enabled command and keybinding. |
 | Offline | Shown whenever a network action finds no connection. |
 
@@ -70,15 +66,15 @@ On first launch choose **Enter** on the login screen. termusic shows a URL and a
 
 ### Networking and auth
 - All network calls run in background tasks, so the UI never freezes. Connectivity is checked before each one.
-- Tokens are stored in your config dir (`termusic/tokens.json`, mode `0600`) and refreshed automatically. If Google revokes the session, you're logged out and returned to the Login screen.
+- Sign-in uses Google's loopback-redirect flow (Desktop-app client). Tokens are stored in your config dir (`termusic/tokens.json`, mode `0600`) and refreshed automatically. If Google revokes the session you're logged out.
 - Read-only access: the app requests only the `youtube.readonly` scope.
 
 ### CLI
 ```sh
 termusic              # launch the TUI
-termusic login        # sign in from the terminal (prints URL and code)
+termusic login        # sign in (opens your browser)
 termusic logout       # delete stored tokens
-termusic search <q>   # print the top results as text
+termusic search <q>   # print the top results as text (no account needed)
 ```
 
 ## Development
@@ -96,4 +92,4 @@ Layout: `app.rs` (all state), `ui.rs` / `theme.rs` (rendering, colors), `auth.rs
 - Unix only (macOS/Linux): the player uses a Unix socket.
 - No volume control yet.
 - Shuffle uses a clock-based pick, not a uniform random choice.
-- Not yet verified end-to-end against live Google and YouTube.
+- Google sign-in has no PKCE and hasn't been exercised live yet; playlists show only the first 50 tracks.

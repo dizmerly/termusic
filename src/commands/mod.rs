@@ -20,9 +20,18 @@ macro_rules! entry {
     };
 }
 
+fn all() -> [(bool, Command); 7] {
+    entry!(play, pause, skip, shuffle, search, help, quit)
+}
+
+/// True if `key` belongs to a command whose `ENABLED` flag is off.
+pub fn disabled(key: char) -> bool {
+    all().iter().any(|(on, c)| !on && c.key == key)
+}
+
 /// All enabled commands, in display order.
 pub fn enabled() -> Vec<Command> {
-    entry!(play, pause, skip, shuffle, search, help, quit)
+    all()
         .into_iter()
         .filter(|(on, _)| *on)
         .map(|(_, c)| c)
@@ -34,5 +43,15 @@ pub fn key_label(c: char) -> String {
     match c {
         '\n' => "Enter".into(),
         c => c.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_enabled_command_is_listed_once() {
+        let keys: Vec<_> = super::enabled().iter().map(|c| c.key).collect();
+        assert!(keys.contains(&'p') && !super::disabled('p'));
+        assert_eq!(keys.len(), 7);
     }
 }
