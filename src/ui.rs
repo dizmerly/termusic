@@ -12,7 +12,12 @@ use ratatui::{
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let [logo, body, bar] = Layout::vertical([
-        Constraint::Length(if app.screen == Screen::Help { 0 } else { 6 }), // help needs the room
+        // Logo only when there's room; Help needs every row.
+        Constraint::Length(if app.screen == Screen::Help || f.area().height < 20 {
+            0
+        } else {
+            6
+        }),
         Constraint::Min(3),
         Constraint::Length(1),
     ])
@@ -158,14 +163,22 @@ fn draw_list(
             .take(app.page)
             .map(|(i, t)| {
                 let sel = i == app.selected;
+                let channel = fit(&t.channel, 24);
+                // 3 marker + 3 index + 2 gap columns; the channel always stays visible.
+                let room = (inner.width as usize).saturating_sub(8 + channel.chars().count());
+                let marker = match (sel, app.player.now_playing.as_deref() == Some(&t.title)) {
+                    (true, _) => " ▶ ",
+                    (_, true) => " ♪ ",
+                    _ => "   ",
+                };
                 let item = ListItem::new(Line::from(vec![
-                    Span::styled(if sel { " ▶ " } else { "   " }, fg(theme::PINK)),
+                    Span::styled(marker, fg(theme::PINK)),
                     Span::styled(format!("{:>2} ", i + 1), theme::dim()),
                     Span::styled(
-                        t.title.clone(),
+                        fit(&t.title, room),
                         fg(if sel { theme::YELLOW } else { theme::CYAN }),
                     ),
-                    Span::styled(format!("  {}", t.channel), fg(theme::PURPLE)),
+                    Span::styled(format!("  {channel}"), fg(theme::PURPLE)),
                 ]));
                 if sel {
                     item.style(theme::selected())
@@ -177,6 +190,14 @@ fn draw_list(
     };
     f.render_widget(block, area);
     f.render_widget(List::new(items), inner);
+}
+
+/// Truncate to `n` chars with an ellipsis.
+fn fit(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.into();
+    }
+    s.chars().take(n.saturating_sub(1)).chain(['…']).collect()
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
@@ -210,4 +231,43 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Paragraph::new(lines).block(theme::panel("Help", theme::PINK)),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn render(app: &mut App, w: u16, h: u16) -> String {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| draw(f, app)).unwrap();
+        t.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn help_fits_80x24() {
+        let mut a = App::new();
+        a.screen = Screen::Help;
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains("closes this screen"), "help clipped");
+        assert!(s.contains("Open the search prompt"));
+    }
+
+    #[test]
+    fn long_titles_keep_channel_visible() {
+        let mut a = App::new();
+        a.screen = Screen::Results;
+        a.results = vec![Track {
+            title: "x".repeat(200),
+            channel: "Artist".into(),
+            id: "i".into(),
+        }];
+        assert!(render(&mut a, 80, 24).contains("Artist"));
+        render(&mut a, 20, 5); // tiny terminal must not panic
+    }
 }

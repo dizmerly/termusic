@@ -21,4 +21,6 @@ Opus plans/reviews only. Implementation by Sonnet agents (Haiku for trivial task
 - Iter 1 (done): search moved to `yt-dlp` (guest-capable); OAuth switched to loopback flow because Google "Desktop app" clients reject device flow; login optional (`P` when signed out). Credentials via env or `client_secret.json` in the config dir (git-ignored). Verified live via a pty: search → play → pause → skip → quit leaves no mpv. Judge: 7/10.
 - Iter 2 (done): `ENABLED` flags now gate key dispatch; token file created 0600; startup warning when mpv/yt-dlp missing; Online-retry no longer forces Login; state-machine tests; README rewritten.
 - Iter 3 (done): volume commands (+/-), single-width shuffle icon, clearer playback-failure message. Judge: 7.5/10.
-- Iter 4 (done): help fits 80x24 (logo hidden on Help), Esc on Search returns to results, yt-dlp search timeout (30s, killed on drop), random OAuth state, `play` description fixed, key-handling tests.
+- Iter 4 (done): help screen gets all rows (logo hidden; two lines still clipped until iter 5), Esc on Search returns to results, yt-dlp search timeout (30s, killed on drop), random OAuth state, `play` description fixed, key-handling tests.
+- Iter 4 judge: 7.5/10 (help still clipped, long titles hid the channel).
+- Iter 5 (done): shortened help text, titles truncated so channel stays visible, ♪ marks the playing row, logo hidden under 20 rows, TestBackend render tests (help 80x24, tiny terminal no panic).
