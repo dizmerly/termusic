@@ -12,7 +12,7 @@ use ratatui::{
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let [logo, body, bar] = Layout::vertical([
-        Constraint::Length(6),
+        Constraint::Length(if app.screen == Screen::Help { 0 } else { 6 }), // help needs the room
         Constraint::Min(3),
         Constraint::Length(1),
     ])

@@ -28,16 +28,18 @@ async fn get(path: &str, params: &[(&str, &str)]) -> Result<Vec<Track>> {
 
 /// Search via yt-dlp so it works without a Google account.
 pub async fn search(q: &str) -> Result<Vec<Track>> {
-    let out = tokio::process::Command::new("yt-dlp")
-        .args([
-            "--flat-playlist",
-            "--no-warnings",
-            "--print",
-            "%(id)s\t%(title)s\t%(channel)s",
-        ])
-        .arg(format!("ytsearch{TOP_K}:{q}"))
-        .output()
+    let mut cmd = tokio::process::Command::new("yt-dlp");
+    cmd.args([
+        "--flat-playlist",
+        "--no-warnings",
+        "--print",
+        "%(id)s\t%(title)s\t%(channel)s",
+    ])
+    .arg(format!("ytsearch{TOP_K}:{q}"))
+    .kill_on_drop(true); // a timed-out search must not leave yt-dlp running
+    let out = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output())
         .await
+        .context("search timed out")?
         .context("cannot start yt-dlp (must be on PATH)")?;
     if !out.status.success() {
         bail!(

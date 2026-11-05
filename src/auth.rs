@@ -125,7 +125,11 @@ pub async fn login(on_url: impl Fn(&str)) -> Result<()> {
     let (id, secret) = creds()?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let redirect = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
-    let state = now().to_string() + &std::process::id().to_string();
+    let state = {
+        let mut b = [0u8; 16];
+        std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom")?, &mut b)?; // unix-only, like the player
+        b.iter().map(|x| format!("{x:02x}")).collect::<String>()
+    };
     let url = reqwest::Url::parse_with_params(
         "https://accounts.google.com/o/oauth2/v2/auth",
         [

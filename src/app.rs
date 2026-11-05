@@ -209,6 +209,7 @@ impl App {
                 KeyCode::Backspace => {
                     self.input.pop();
                 }
+                KeyCode::Esc if !self.results.is_empty() => self.screen = Screen::Results,
                 KeyCode::Esc => self.quit = true,
                 KeyCode::F(1) => self.open_help(),
                 _ => {}
@@ -348,5 +349,42 @@ mod tests {
         a.next();
         assert_eq!(a.selected, 29);
         assert!(a.player.now_playing.is_none());
+    }
+
+    fn press(a: &mut App, c: KeyCode) {
+        a.handle_key(KeyEvent::new(c, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn search_typing_and_esc() {
+        let mut a = App::new();
+        a.screen = Screen::Search;
+        a.results.clear();
+        for c in "pq".chars() {
+            press(&mut a, KeyCode::Char(c)); // command letters are plain text here
+        }
+        assert_eq!(a.input, "pq");
+        a.results = vec![Track {
+            title: "t".into(),
+            channel: String::new(),
+            id: "i".into(),
+        }];
+        press(&mut a, KeyCode::Esc);
+        assert_eq!((a.screen, a.quit), (Screen::Results, false));
+    }
+
+    #[test]
+    fn list_keys_and_help_roundtrip() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('j'));
+        assert_eq!(a.selected, 1);
+        press(&mut a, KeyCode::Char('s'));
+        assert!(a.player.shuffle);
+        press(&mut a, KeyCode::Char('?'));
+        assert_eq!(a.screen, Screen::Help);
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.screen, Screen::Results);
+        press(&mut a, KeyCode::Char('q'));
+        assert!(a.quit);
     }
 }
