@@ -6,6 +6,8 @@ pub mod quit;
 pub mod search;
 pub mod shuffle;
 pub mod skip;
+pub mod volume_down;
+pub mod volume_up;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Command {
@@ -20,8 +22,18 @@ macro_rules! entry {
     };
 }
 
-fn all() -> [(bool, Command); 7] {
-    entry!(play, pause, skip, shuffle, search, help, quit)
+fn all() -> [(bool, Command); 9] {
+    entry!(
+        play,
+        pause,
+        skip,
+        shuffle,
+        volume_up,
+        volume_down,
+        search,
+        help,
+        quit
+    )
 }
 
 /// True if `key` belongs to a command whose `ENABLED` flag is off.
@@ -52,6 +64,6 @@ mod tests {
     fn every_enabled_command_is_listed_once() {
         let keys: Vec<_> = super::enabled().iter().map(|c| c.key).collect();
         assert!(keys.contains(&'p') && !super::disabled('p'));
-        assert_eq!(keys.len(), 7);
+        assert_eq!(keys.len(), 9);
     }
 }

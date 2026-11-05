@@ -15,7 +15,7 @@ pub const LOGO: [&str; 5] = [
 pub const ICON_NOTE: &str = "♪";
 pub const ICON_PLAY: &str = "▶";
 pub const ICON_PAUSE: &str = "⏸";
-pub const ICON_SHUFFLE: &str = "🔀";
+pub const ICON_SHUFFLE: &str = "⤮";
 pub const ICON_BUSY: &str = "⟳";
 
 pub const PINK: Color = Color::Rgb(255, 105, 180);

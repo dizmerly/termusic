@@ -49,6 +49,7 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 | `p` | Pause / resume |
 | `n` | Next track |
 | `s` | Toggle shuffle |
+| `+` / `-` | Volume up / down |
 | `/` | New search |
 | `P` | Your playlists |
 | `j` / `↓`, `k` / `↑` | Move selection |
@@ -90,6 +91,5 @@ Layout: `app.rs` (all state), `ui.rs` / `theme.rs` (rendering, colors), `auth.rs
 
 ## Limitations
 - Unix only (macOS/Linux): the player uses a Unix socket.
-- No volume control yet.
 - Shuffle uses a clock-based pick, not a uniform random choice.
 - Google sign-in has no PKCE and hasn't been exercised live yet; playlists show only the first 50 tracks.

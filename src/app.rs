@@ -258,6 +258,11 @@ impl App {
                 }
             }
             KeyCode::Char('n') => self.next(),
+            KeyCode::Char(c @ ('+' | '-')) => {
+                if let Err(e) = self.player.volume(if c == '+' { 5 } else { -5 }) {
+                    self.status = e.to_string();
+                }
+            }
             KeyCode::Char('s') => self.player.toggle_shuffle(),
             KeyCode::Char('P') => self.open_playlists(),
             KeyCode::Char('/') | KeyCode::Esc => self.screen = Screen::Search,

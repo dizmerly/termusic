@@ -59,14 +59,26 @@ impl Player {
         self.now_playing = None;
     }
 
-    pub fn toggle_pause(&mut self) -> Result<()> {
+    /// Send one JSON command to the running mpv (no-op when nothing is playing).
+    fn ipc(&self, cmd: &str) -> Result<()> {
         if self.child.is_some() {
             UnixStream::connect(sock())
-                .and_then(|mut s| s.write_all(b"{\"command\":[\"cycle\",\"pause\"]}\n"))
+                .and_then(|mut s| writeln!(s, "{{\"command\":{cmd}}}"))
                 .context("mpv not ready yet")?;
+        }
+        Ok(())
+    }
+
+    pub fn toggle_pause(&mut self) -> Result<()> {
+        self.ipc(r#"["cycle","pause"]"#)?;
+        if self.child.is_some() {
             self.playing = !self.playing;
         }
         Ok(())
+    }
+
+    pub fn volume(&self, delta: i32) -> Result<()> {
+        self.ipc(&format!(r#"["add","volume",{delta}]"#))
     }
 
     pub fn toggle_shuffle(&mut self) {
