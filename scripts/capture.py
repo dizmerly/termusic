@@ -11,7 +11,7 @@ import pyte
 from PIL import Image, ImageDraw, ImageFont
 
 COLS, ROWS = 100, 30
-KEYS = {"enter": "\r", "esc": "\x1b", "down": "\x1b[B", "up": "\x1b[A", "space": " ", "tab": "\t", "f2": "\x1bOQ"}
+KEYS = {"enter": "\r", "esc": "\x1b", "down": "\x1b[B", "up": "\x1b[A", "space": " ", "tab": "\t", "f1": "\x1bOP", "f2": "\x1bOQ", "f3": "\x1bOR", "f4": "\x1bOS"}
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "docs", "screenshots")
 FONT = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 14)
