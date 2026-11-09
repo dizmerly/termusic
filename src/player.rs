@@ -34,6 +34,8 @@ pub struct Player {
     fade: Option<Fade>,
     /// Counter for distinct socket names.
     spawned: u32,
+    /// The mpv binary; tests point it at a stand-in.
+    pub mpv: String,
 }
 
 /// An in-progress crossfade between `current` and `next`.
@@ -42,6 +44,8 @@ struct Fade {
     start: Instant,
     len: f64,
     stepped: Instant,
+    /// Set while paused, so the fade does not advance meanwhile.
+    paused_at: Option<Instant>,
 }
 
 impl Default for Player {
@@ -78,12 +82,8 @@ fn sock(app_pid: u32, n: u32) -> PathBuf {
     std::env::temp_dir().join(format!("termusic-mpv-{app_pid}-{n}.sock"))
 }
 
-/// Unit tests must not start a real mpv (network, installed or not): `true` exits at once.
-fn mpv_program() -> &'static str {
-    if cfg!(test) { "true" } else { "mpv" }
-}
-
 fn mpv_command(
+    program: &str,
     url: &str,
     sock: &std::path::Path,
     loop_file: bool,
@@ -91,7 +91,7 @@ fn mpv_command(
     start: u64,
     paused: bool,
 ) -> Command {
-    let mut c = Command::new(mpv_program());
+    let mut c = Command::new(program);
     c.args(["--no-video", "--no-terminal", "--ytdl-format=bestaudio"])
         .args(paused.then_some("--pause=yes"))
         .arg(format!("--volume={volume}"))
@@ -128,7 +128,8 @@ fn seek_json(delta: i32) -> String {
 }
 
 /// Polls once a second; once the app or mpv is gone, kills mpv and removes its socket.
-const WATCHDOG: &str = r#"while kill -0 "$1" 2>/dev/null && kill -0 "$2" 2>/dev/null; do sleep 1; done
+const WATCHDOG: &str = r#"trap '' HUP
+while kill -0 "$1" 2>/dev/null && kill -0 "$2" 2>/dev/null; do sleep 1; done
 kill "$2" 2>/dev/null; rm -f "$3""#;
 
 fn watchdog_command(app_pid: u32, mpv_pid: u32, sock: &std::path::Path) -> Command {
@@ -163,6 +164,7 @@ impl Player {
             tried: None,
             fade: None,
             spawned: 0,
+            mpv: "mpv".into(),
         }
     }
 
@@ -176,9 +178,11 @@ impl Player {
         let sock = self.next_sock();
         let url = format!("https://www.youtube.com/watch?v={}", t.id);
         let vol = if preload { 0 } else { self.volume };
-        let mpv = quiet(mpv_command(&url, &sock, loop_file, vol, start, preload))
-            .spawn()
-            .context("cannot start mpv (mpv and yt-dlp must be on PATH)")?;
+        let mpv = quiet(mpv_command(
+            &self.mpv, &url, &sock, loop_file, vol, start, preload,
+        ))
+        .spawn()
+        .context("cannot start mpv (mpv and yt-dlp must be on PATH)")?;
         wrap(mpv, sock, &t.id, &t.title)
     }
 
@@ -229,6 +233,17 @@ impl Player {
         }
     }
 
+    /// Abort a fade: the preload goes back to paused and silent, the current track to full volume.
+    fn cancel_fade(&mut self) {
+        if self.fade.take().is_some() {
+            if let Some(n) = &self.next {
+                let _ = ipc_to(&n.sock, &pause_json(true));
+                let _ = ipc_to(&n.sock, &volume_json(0));
+            }
+            let _ = self.ipc(&volume_json(self.volume));
+        }
+    }
+
     /// Make the preloaded track `id` the current one at once (unpaused, at the user's volume).
     /// False (preload dropped, caller plays cold) if there is none or it is not ready.
     pub fn promote(&mut self, id: &str) -> bool {
@@ -245,6 +260,9 @@ impl Player {
             old.kill();
         }
         self.set_current(n);
+        if let Some(r) = self.current.as_mut() {
+            r.started = Instant::now(); // an exit right after promotion is a failure
+        }
         self.vol_synced = true;
         true
     }
@@ -279,6 +297,13 @@ impl Player {
         if self.current.is_some() {
             self.playing = !self.playing;
         }
+        if let (Some(f), Some(n)) = (self.fade.as_mut(), &self.next) {
+            let _ = ipc_to(&n.sock, r#"["cycle","pause"]"#); // both stay in step
+            match f.paused_at.take() {
+                Some(at) => f.start += at.elapsed(), // resume: the pause did not count
+                None => f.paused_at = Some(Instant::now()),
+            }
+        }
         Ok(())
     }
 
@@ -292,7 +317,8 @@ impl Player {
     }
 
     /// Jump `delta` seconds (negative = back) in the current track.
-    pub fn seek(&self, delta: i32) -> Result<()> {
+    pub fn seek(&mut self, delta: i32) -> Result<()> {
+        self.cancel_fade(); // restarts on the next poll if still inside the window
         self.ipc(&seek_json(delta))
     }
 
@@ -327,6 +353,7 @@ impl Player {
                     self.vol_synced = true;
                     let _ = self.ipc(&volume_json(self.volume));
                 }
+                self.keep_preload_fit();
                 self.maybe_start_fade();
             }
             return self.step_fade();
@@ -340,13 +367,28 @@ impl Player {
         Some(ok)
     }
 
+    /// After a seek back: cancel a fade that is no longer in the window, drop a too-early preload.
+    fn keep_preload_fit(&mut self) {
+        let Some(left) = self.duration.map(|d| d - self.position) else {
+            return;
+        };
+        if left > CROSSFADE_SECS {
+            self.cancel_fade();
+        }
+        if left > PRELOAD_SECS && self.next.is_some() {
+            self.discard_preload();
+            self.tried = None; // may preload again once near the end
+        }
+    }
+
     /// Unpause the preload when the last `CROSSFADE_SECS` begin.
     fn maybe_start_fade(&mut self) {
         let (Some(n), Some(d)) = (&self.next, self.duration) else {
             return;
         };
         let left = d - self.position;
-        if self.fade.is_none()
+        if self.playing
+            && self.fade.is_none()
             && left <= CROSSFADE_SECS
             && ipc_to(&n.sock, &pause_json(false)).is_ok()
         {
@@ -355,6 +397,7 @@ impl Player {
                 start: now,
                 len: left.max(1.0),
                 stepped: now.checked_sub(FADE_STEP).unwrap_or(now),
+                paused_at: None,
             });
         }
     }
@@ -362,7 +405,7 @@ impl Player {
     /// Send the next fade step; `Some(true)` once the fade is complete.
     fn step_fade(&mut self) -> Option<bool> {
         let f = self.fade.as_mut()?;
-        if f.stepped.elapsed() < FADE_STEP {
+        if f.paused_at.is_some() || f.stepped.elapsed() < FADE_STEP {
             return None;
         }
         f.stepped = Instant::now();
@@ -550,6 +593,126 @@ mod tests {
         assert!(pids.iter().all(|&x| !alive(x)));
     }
 
+    /// Stand-in for an mpv socket: records what the player sends.
+    fn listener(tag: &str) -> (std::os::unix::net::UnixListener, PathBuf) {
+        let p = std::env::temp_dir().join(format!("termusic-lt-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let l = std::os::unix::net::UnixListener::bind(&p).unwrap();
+        l.set_nonblocking(true).unwrap();
+        (l, p)
+    }
+
+    fn drain(l: &std::os::unix::net::UnixListener) -> String {
+        let mut out = String::new();
+        while let Ok((mut s, _)) = l.accept() {
+            s.set_nonblocking(false).unwrap();
+            let _ = std::io::Read::read_to_string(&mut s, &mut out);
+        }
+        out
+    }
+
+    /// Player with a current and a preloaded fake mpv, each behind a listener.
+    fn rig(tag: &str) -> (Player, [std::os::unix::net::UnixListener; 2]) {
+        let mut p = Player::new(80);
+        let ((lc, sc), (ln, sn)) = (listener(&format!("{tag}c")), listener(&format!("{tag}n")));
+        p.set_current(wrap(sleeper("60"), sc, "c", "c").unwrap());
+        p.next = Some(wrap(sleeper("60"), sn, "n", "n").unwrap());
+        (p, [lc, ln])
+    }
+
+    fn start_fade(p: &mut Player, elapsed: f64) {
+        let now = Instant::now();
+        p.fade = Some(Fade {
+            start: now - Duration::from_secs_f64(elapsed),
+            len: 4.0,
+            stepped: now - FADE_STEP,
+            paused_at: None,
+        });
+    }
+
+    #[test]
+    fn promote_sends_volume_and_unpause_and_kills_old() {
+        let (mut p, [lc, ln]) = rig("promote");
+        let old = p.current.as_ref().unwrap().mpv.id();
+        assert!(p.promote("n"));
+        let sent = drain(&ln);
+        assert!(sent.contains(r#"["set_property","volume",80]"#), "{sent}");
+        assert!(sent.contains(r#"["set_property","pause",false]"#), "{sent}");
+        assert!(drain(&lc).is_empty());
+        assert!(wait_until(|| !alive(old)));
+        assert_eq!(p.current.as_ref().unwrap().id, "n");
+        assert!(p.next.is_none() && p.playing);
+        assert!(p.current.as_ref().unwrap().started.elapsed() < Duration::from_secs(1));
+        p.stop();
+    }
+
+    #[test]
+    fn step_fade_ramps_and_completes() {
+        let (mut p, [lc, ln]) = rig("step");
+        start_fade(&mut p, 2.0);
+        assert_eq!(p.step_fade(), None);
+        let (o, n) = fade_volumes(0.5, 80);
+        assert!(drain(&lc).contains(&volume_json(o)));
+        assert!(drain(&ln).contains(&volume_json(n)));
+        start_fade(&mut p, 5.0);
+        assert_eq!(p.step_fade(), Some(true));
+        assert!(p.fade.is_none());
+        assert!(drain(&ln).contains(&volume_json(80)));
+        p.stop();
+    }
+
+    #[test]
+    fn discard_during_fade_restores_volume() {
+        let (mut p, [lc, _ln]) = rig("discard");
+        start_fade(&mut p, 1.0);
+        p.discard_preload();
+        assert!(p.next.is_none() && p.fade.is_none());
+        assert!(drain(&lc).contains(&volume_json(80)));
+        p.stop();
+    }
+
+    #[test]
+    fn pause_during_fade_pauses_both_and_freezes_it() {
+        let (mut p, [lc, ln]) = rig("pause");
+        start_fade(&mut p, 1.0);
+        p.toggle_pause().unwrap();
+        assert!(drain(&lc).contains("cycle") && drain(&ln).contains("cycle"));
+        assert!(!p.playing);
+        assert_eq!(p.step_fade(), None); // frozen
+        p.toggle_pause().unwrap();
+        assert!(p.fade.as_ref().unwrap().paused_at.is_none());
+        p.stop();
+    }
+
+    #[test]
+    fn seek_during_fade_cancels_it() {
+        let (mut p, [lc, ln]) = rig("seek");
+        start_fade(&mut p, 1.0);
+        p.seek(-30).unwrap();
+        assert!(p.fade.is_none());
+        let (c, n) = (drain(&lc), drain(&ln));
+        assert!(
+            c.contains(&seek_json(-30)) && c.contains(&volume_json(80)),
+            "{c}"
+        );
+        assert!(
+            n.contains(&pause_json(true)) && n.contains(&volume_json(0)),
+            "{n}"
+        );
+        assert!(p.next.is_some()); // still preloaded
+        p.stop();
+    }
+
+    #[test]
+    fn far_from_the_end_cancels_fade_and_drops_preload() {
+        let (mut p, _l) = rig("far");
+        start_fade(&mut p, 1.0);
+        p.duration = Some(200.0);
+        p.position = 100.0;
+        p.keep_preload_fit();
+        assert!(p.fade.is_none() && p.next.is_none() && p.tried.is_none());
+    }
+
     #[test]
     fn socket_names_are_distinct() {
         assert_ne!(sock(1, 1), sock(1, 2));
@@ -688,18 +851,20 @@ mod tests {
         };
         let w = args(&watchdog_command(1, 2, s));
         assert_eq!(w[3..], ["1", "2", "/tmp/x.sock"]);
-        let m = args(&mpv_command("u", s, true, 42, 0, false));
+        let m = args(&mpv_command("mpv", "u", s, true, 42, 0, false));
         assert!(m.contains(&"--no-video".into()));
         assert!(m.contains(&"--loop-file=inf".into()));
         assert!(m.contains(&"--volume=42".into()));
         assert!(
-            !args(&mpv_command("u", s, false, 42, 0, false))
+            !args(&mpv_command("mpv", "u", s, false, 42, 0, false))
                 .iter()
                 .any(|a| a.starts_with("--loop") || a.starts_with("--start"))
         );
-        assert!(args(&mpv_command("u", s, false, 42, 95, false)).contains(&"--start=95".into()));
+        assert!(
+            args(&mpv_command("mpv", "u", s, false, 42, 95, false)).contains(&"--start=95".into())
+        );
         assert!(!m.contains(&"--pause=yes".into()));
-        let pre = args(&mpv_command("u", s, false, 0, 0, true));
+        let pre = args(&mpv_command("mpv", "u", s, false, 0, 0, true));
         assert!(pre.contains(&"--pause=yes".into()) && pre.contains(&"--volume=0".into()));
         assert!(m.contains(&"--input-ipc-server=/tmp/x.sock".into()));
         assert_eq!(m.last().unwrap(), "u");

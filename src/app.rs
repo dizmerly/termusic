@@ -140,7 +140,9 @@ impl App {
     /// Tests use this with no path so they never touch the real config.
     #[cfg(test)]
     pub(crate) fn blank() -> Self {
-        Self::with_paths(Settings::default(), None)
+        let mut a = Self::with_paths(Settings::default(), None);
+        a.player.mpv = "true".into(); // exits at once: tests never start a real mpv
+        a
     }
 
     fn with_paths(settings: Settings, history_path: Option<PathBuf>) -> Self {
@@ -526,7 +528,7 @@ impl App {
 
     /// Save everything synchronously; called once on the way out.
     pub fn shutdown(&mut self) {
-        let _io = IO.lock().unwrap_or_else(|e| e.into_inner()); // after any background write
+        let _io = IO.lock().unwrap_or_else(|e| e.into_inner()); // waits for a background write already running; one still queued may land after ours
         self.record_position();
         self.settings.volume = self.player.volume;
         self.settings.save();
