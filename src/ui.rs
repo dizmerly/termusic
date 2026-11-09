@@ -121,6 +121,9 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
     if app.player.shuffle {
         spans.push(Span::raw(format!(" {}", theme::ICON_SHUFFLE)));
     }
+    if app.player.looping {
+        spans.push(Span::raw(format!(" {}", theme::ICON_LOOP)));
+    }
     if app.busy {
         spans.push(Span::styled(
             format!("  {} working…", theme::ICON_BUSY),
@@ -223,7 +226,6 @@ fn draw_help(f: &mut Frame, area: Rect) {
         key("PgDn/Up".into(), "move one page".into()),
         key("g / G".into(), "jump to first / last".into()),
         key("P".into(), "your playlists (Enter opens one)".into()),
-        key("/".into(), "new search".into()),
         Line::raw(""),
         Line::styled("Esc, ? or q closes this screen.", theme::dim()),
     ]);

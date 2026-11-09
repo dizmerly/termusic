@@ -4,18 +4,18 @@ use ratatui::{
     widgets::{Block, BorderType},
 };
 
-pub const LOGO: [&str; 5] = [
-    r"  _                           _",
-    r" | |_ ___ _ __ _ __ ___  _   _ ___(_) ___",
-    r" | __/ _ \ '__| '_ ` _ \| | | / __| |/ __|",
-    r" | ||  __/ |  | | | | | | |_| \__ \ | (__",
-    r"  \__\___|_|  |_| |_| |_|\__,_|___/_|\___|",
+/// All lines must be the same width: `Paragraph` centers each line separately.
+pub const LOGO: [&str; 3] = [
+    "╔╦╗╔═╗╦═╗╔╦╗╦ ╦╔═╗╦╔═╗",
+    " ║ ║╣ ╠╦╝║║║║ ║╚═╗║║  ",
+    " ╩ ╚═╝╩╚═╩ ╩╚═╝╚═╝╩╚═╝",
 ];
 
 pub const ICON_NOTE: &str = "♪";
 pub const ICON_PLAY: &str = "▶";
 pub const ICON_PAUSE: &str = "⏸";
 pub const ICON_SHUFFLE: &str = "⤮";
+pub const ICON_LOOP: &str = "↻";
 pub const ICON_BUSY: &str = "⟳";
 
 pub const PINK: Color = Color::Rgb(255, 105, 180);
@@ -28,7 +28,7 @@ pub const ROW_BG: Color = Color::Rgb(58, 42, 92);
 pub const BAR_BG: Color = Color::Rgb(30, 30, 46);
 
 /// One color per logo line, top to bottom.
-pub const LOGO_GRADIENT: [Color; 5] = [PINK, ORANGE, YELLOW, GREEN, CYAN];
+pub const LOGO_GRADIENT: [Color; 3] = [PINK, YELLOW, CYAN];
 
 pub fn title() -> Style {
     Style::default().fg(PINK).add_modifier(Modifier::BOLD)
@@ -50,4 +50,15 @@ pub fn panel(title: &str, color: Color) -> Block<'_> {
         .border_style(fg(color))
         .title(format!(" {title} "))
         .title_style(fg(color).add_modifier(Modifier::BOLD))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logo_lines_are_equal_width() {
+        let w = LOGO[0].chars().count();
+        assert!(LOGO.iter().all(|l| l.chars().count() == w));
+    }
 }

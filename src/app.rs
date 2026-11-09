@@ -15,6 +15,8 @@ pub enum Msg {
     LoginUrl(String),
     LoggedIn,
     Tracks(Vec<Track>),
+    /// Related tracks for the video id they were fetched for.
+    Related(String, Vec<Track>),
     Playlists(Vec<Track>),
 }
 
@@ -35,6 +37,10 @@ pub struct App {
     pub input: String,
     pub results: Vec<Track>,
     pub playlists: Vec<Track>,
+    /// `results` is an opened playlist (keeps its order; no related lookup on play).
+    from_playlist: bool,
+    /// Id of the track being played, to drop stale related results.
+    playing_id: Option<String>,
     /// Authorization page while waiting for the user to sign in.
     pub login_url: Option<String>,
     /// A network task is in flight.
@@ -62,6 +68,8 @@ impl App {
         let (tx, rx) = unbounded_channel();
         Self {
             playlists: Vec::new(),
+            from_playlist: false,
+            playing_id: None,
             login_url: None,
             busy: false,
             tx,
@@ -98,6 +106,7 @@ impl App {
 
     fn run_search(&mut self) {
         let q = self.input.trim().to_owned();
+        self.from_playlist = false;
         self.spawn(async move { Ok(Msg::Tracks(youtube::search(&q).await?)) });
     }
 
@@ -151,6 +160,13 @@ impl App {
                     self.screen = Screen::Results;
                     self.select(0);
                 }
+                Msg::Related(id, v) => {
+                    if self.playing_id.as_deref() == Some(&id) && !v.is_empty() {
+                        self.results = v;
+                        self.screen = Screen::Results;
+                        self.select(0);
+                    }
+                }
                 Msg::Playlists(v) => self.playlists = v,
             }
         }
@@ -165,10 +181,11 @@ impl App {
     }
 
     fn play_selected(&mut self) {
-        if let Some(t) = self.results.get(self.selected)
-            && let Err(e) = self.player.play(t)
-        {
-            self.status = e.to_string();
+        if let Some(t) = self.results.get(self.selected) {
+            self.playing_id = Some(t.id.clone());
+            if let Err(e) = self.player.play(t) {
+                self.status = e.to_string();
+            }
         }
     }
 
@@ -252,10 +269,21 @@ impl App {
             KeyCode::Enter if self.screen == Screen::Playlists => {
                 if let Some(p) = self.playlists.get(self.selected) {
                     let id = p.id.clone();
+                    self.from_playlist = true;
                     self.spawn(async move { Ok(Msg::Tracks(youtube::playlist_items(&id).await?)) });
                 }
             }
-            KeyCode::Enter => self.play_selected(),
+            KeyCode::Enter => {
+                self.play_selected();
+                if !self.from_playlist
+                    && let Some(id) = self.playing_id.clone()
+                {
+                    self.spawn(async move {
+                        let v = youtube::related(&id).await?;
+                        Ok(Msg::Related(id, v))
+                    });
+                }
+            }
             KeyCode::Char('p') => {
                 if let Err(e) = self.player.toggle_pause() {
                     self.status = e.to_string();
@@ -268,6 +296,11 @@ impl App {
                 }
             }
             KeyCode::Char('s') => self.player.toggle_shuffle(),
+            KeyCode::Char('l') => {
+                if let Err(e) = self.player.toggle_loop() {
+                    self.status = e.to_string();
+                }
+            }
             KeyCode::Char('P') => self.open_playlists(),
             KeyCode::Char('/') | KeyCode::Esc => self.screen = Screen::Search,
             KeyCode::Char('?') => self.open_help(),
@@ -343,6 +376,24 @@ mod tests {
     }
 
     #[test]
+    fn related_replaces_list_unless_stale() {
+        let t = |id: &str| Track {
+            title: id.into(),
+            channel: String::new(),
+            id: id.into(),
+        };
+        let mut a = app();
+        a.playing_id = Some("x".into());
+        a.tx.send(Msg::Related("old".into(), vec![t("o")])).unwrap();
+        a.tick();
+        assert_eq!(a.results.len(), 30); // stale: ignored
+        a.tx.send(Msg::Related("x".into(), vec![t("x"), t("y")]))
+            .unwrap();
+        a.tick();
+        assert_eq!((a.results.len(), a.selected), (2, 0));
+    }
+
+    #[test]
     fn next_stops_at_end_of_list() {
         let mut a = app();
         a.select(29);
@@ -380,6 +431,10 @@ mod tests {
         assert_eq!(a.selected, 1);
         press(&mut a, KeyCode::Char('s'));
         assert!(a.player.shuffle);
+        press(&mut a, KeyCode::Char('l'));
+        assert!(a.player.looping);
+        press(&mut a, KeyCode::Char('l'));
+        assert!(!a.player.looping);
         press(&mut a, KeyCode::Char('?'));
         assert_eq!(a.screen, Screen::Help);
         press(&mut a, KeyCode::Esc);

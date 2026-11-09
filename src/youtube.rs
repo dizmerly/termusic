@@ -28,14 +28,29 @@ async fn get(path: &str, params: &[(&str, &str)]) -> Result<Vec<Track>> {
 
 /// Search via yt-dlp so it works without a Google account.
 pub async fn search(q: &str) -> Result<Vec<Track>> {
+    ytdlp(&format!("ytsearch{TOP_K}:{q}")).await
+}
+
+/// YouTube's mix ("up next" sidebar) for a video; the video itself is the first entry.
+pub async fn related(id: &str) -> Result<Vec<Track>> {
+    ytdlp(&mix_url(id)).await
+}
+
+fn mix_url(id: &str) -> String {
+    format!("https://www.youtube.com/watch?v={id}&list=RD{id}")
+}
+
+async fn ytdlp(target: &str) -> Result<Vec<Track>> {
     let mut cmd = tokio::process::Command::new("yt-dlp");
     cmd.args([
         "--flat-playlist",
         "--no-warnings",
+        "--playlist-end",
+        &TOP_K.to_string(),
         "--print",
         "%(id)s\t%(title)s\t%(channel)s",
     ])
-    .arg(format!("ytsearch{TOP_K}:{q}"))
+    .arg(target)
     .kill_on_drop(true); // a timed-out search must not leave yt-dlp running
     let out = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output())
         .await
@@ -60,8 +75,8 @@ fn parse_lines(s: &str) -> Vec<Track> {
             let (id, title) = (f.next()?, f.next()?);
             let channel = f.next().filter(|c| *c != "NA").unwrap_or("");
             Some(Track {
-                title: title.into(),
-                channel: channel.into(),
+                title: clean(title),
+                channel: clean(channel),
                 id: id.into(),
             })
         })
@@ -88,6 +103,22 @@ pub async fn playlist_items(id: &str) -> Result<Vec<Track>> {
     .await
 }
 
+/// Drop chars the terminal draws differently from how ratatui counts them: zero-width/control
+/// chars and Indic/Thai scripts (combining vowel signs), which leave stray glyphs on screen.
+/// shortcut: such titles lose those letters (blank becomes "?"); real shaping needs a different TUI stack.
+fn clean(s: &str) -> String {
+    use unicode_width::UnicodeWidthChar;
+    let out: String = s
+        .chars()
+        .filter(|c| c.width().unwrap_or(0) > 0 && !('\u{0900}'..='\u{0E7F}').contains(c))
+        .collect();
+    if out.trim().is_empty() && !s.is_empty() {
+        "?".into()
+    } else {
+        out
+    }
+}
+
 fn unescape(s: &str) -> String {
     s.replace("&quot;", "\"")
         .replace("&#39;", "'")
@@ -109,8 +140,8 @@ fn parse(v: &Value) -> Vec<Track> {
                 .or(s["resourceId"]["videoId"].as_str())
                 .or(it["id"].as_str())?;
             Some(Track {
-                title: unescape(s["title"].as_str()?),
-                channel: unescape(s["channelTitle"].as_str().unwrap_or("")),
+                title: clean(&unescape(s["title"].as_str()?)),
+                channel: clean(&unescape(s["channelTitle"].as_str().unwrap_or(""))),
                 id: id.into(),
             })
         })
@@ -134,6 +165,20 @@ mod tests {
         assert_eq!(ids, ["v1", "v2", "PL1"]);
         assert_eq!(t[0].title, "A & B");
         assert!(parse(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn clean_drops_zero_width_keeps_wide() {
+        assert_eq!(clean("a\u{093e}b\u{200b}\u{0007}世"), "ab世");
+        assert_eq!(clean("\u{0924}\u{0947}"), "?");
+    }
+
+    #[test]
+    fn mix_url_uses_radio_list() {
+        assert_eq!(
+            mix_url("abc"),
+            "https://www.youtube.com/watch?v=abc&list=RDabc"
+        );
     }
 
     #[test]

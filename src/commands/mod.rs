@@ -1,5 +1,6 @@
 //! Command registry. Each submodule declares `ENABLED`, `NAME`, `KEY`, `DESCRIPTION`.
 pub mod help;
+pub mod loop_track;
 pub mod pause;
 pub mod play;
 pub mod quit;
@@ -22,12 +23,13 @@ macro_rules! entry {
     };
 }
 
-fn all() -> [(bool, Command); 9] {
+fn all() -> [(bool, Command); 10] {
     entry!(
         play,
         pause,
         skip,
         shuffle,
+        loop_track,
         volume_up,
         volume_down,
         search,
@@ -64,6 +66,7 @@ mod tests {
     fn every_enabled_command_is_listed_once() {
         let keys: Vec<_> = super::enabled().iter().map(|c| c.key).collect();
         assert!(keys.contains(&'p') && !super::disabled('p'));
-        assert_eq!(keys.len(), 9);
+        assert_eq!(keys.len(), 10);
+        assert!(keys.contains(&'l'));
     }
 }

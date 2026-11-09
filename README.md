@@ -45,10 +45,11 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 ### Keys
 | Key | Action |
 |-----|--------|
-| `Enter` | Play the highlighted track (Playlists: open the playlist) |
+| `Enter` | Play the highlighted track and replace the list with its YouTube mix (related tracks; `n` follows it). Playlists: open the playlist, which keeps its own order |
 | `p` | Pause / resume |
 | `n` | Next track |
 | `s` | Toggle shuffle |
+| `l` | Toggle looping the current track (↻ in the status bar) |
 | `+` / `-` | Volume up / down |
 | `/` | New search |
 | `P` | Your playlists |

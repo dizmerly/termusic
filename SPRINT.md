@@ -25,3 +25,6 @@ Opus plans/reviews only. Implementation by Sonnet agents (Haiku for trivial task
 - Iter 4 judge: 7.5/10 (help still clipped, long titles hid the channel).
 - Iter 5 (done): shortened help text, titles truncated so channel stays visible, ♪ marks the playing row, logo hidden under 20 rows, TestBackend render tests (help 80x24, tiny terminal no panic).
 - Iter 5 judge: 8.5/10. Open: playing marker compares titles not ids; Help clips below 24 rows; no PKCE; auto-advance/shuffle untested; nav keys in help are hand-written.
+- Iter 6 (done): Enter on a search result loads YouTube's mix (`list=RD<id>` via yt-dlp) as the new list, so `n`/auto-advance follow related tracks; playlists keep their order. Stale related results are dropped. Not yet checked live.
+- Iter 7 (done): SIGKILL no longer orphans mpv: per-track `sh` watchdog (polls app+mpv pid every 1s, kills mpv, removes socket). player.rs refactored (`Running`, `mpv_command`, `watchdog_command`, `attach`) and covered by 5 tests incl. a real kill -9; verified live via pty.
+- Iter 8 (done): `l` toggles looping the current track (commands/loop_track.rs; mpv `--loop-file=inf`, also applied live over IPC); ↻ shown in the status bar.
