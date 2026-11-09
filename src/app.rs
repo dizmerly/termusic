@@ -1,6 +1,7 @@
 //! Application state and key handling.
 use crate::commands;
 use crate::player::Player;
+use crate::queue::{Loop, Queue};
 use crate::youtube::{self, Track};
 use crate::{auth, net};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -39,8 +40,6 @@ pub struct App {
     pub playlists: Vec<Track>,
     /// `results` is an opened playlist (keeps its order; no related lookup on play).
     from_playlist: bool,
-    /// Id of the track being played, to drop stale related results.
-    playing_id: Option<String>,
     /// Authorization page while waiting for the user to sign in.
     pub login_url: Option<String>,
     /// A network task is in flight.
@@ -53,6 +52,7 @@ pub struct App {
     /// Visible rows in the results list; updated by `ui` each frame.
     pub page: usize,
     pub player: Player,
+    pub queue: Queue,
     pub status: String,
     pub quit: bool,
 }
@@ -69,7 +69,6 @@ impl App {
         Self {
             playlists: Vec::new(),
             from_playlist: false,
-            playing_id: None,
             login_url: None,
             busy: false,
             tx,
@@ -82,6 +81,7 @@ impl App {
             offset: 0,
             page: 10,
             player: Player::default(),
+            queue: Queue::new(),
             status: crate::player::missing_deps().unwrap_or_default(),
             quit: false,
         }
@@ -161,7 +161,9 @@ impl App {
                     self.select(0);
                 }
                 Msg::Related(id, v) => {
-                    if self.playing_id.as_deref() == Some(&id) && !v.is_empty() {
+                    if self.queue.current().is_some_and(|t| t.id == id) && !v.is_empty() {
+                        self.queue
+                            .set_upcoming(v.iter().filter(|t| t.id != id).cloned().collect());
                         self.results = v;
                         self.screen = Screen::Results;
                         self.select(0);
@@ -181,32 +183,30 @@ impl App {
     }
 
     fn play_selected(&mut self) {
-        if let Some(t) = self.results.get(self.selected) {
-            self.playing_id = Some(t.id.clone());
-            if let Err(e) = self.player.play(t) {
-                self.status = e.to_string();
-            }
+        self.queue.set(self.results.clone(), self.selected);
+        self.play_current();
+    }
+
+    /// Play the queue's current track (stop if there is none) and highlight it in the list.
+    fn play_current(&mut self) {
+        let Some(t) = self.queue.current().cloned() else {
+            self.player.stop();
+            return;
+        };
+        if self.screen != Screen::Playlists
+            && let Some(i) = self.results.iter().position(|r| r.id == t.id)
+        {
+            self.select(i);
+        }
+        if let Err(e) = self.player.play(&t, self.queue.looping == Loop::One) {
+            self.status = e.to_string();
         }
     }
 
-    /// Next track: random when shuffling, else the following one; stops at the end of the list.
+    /// Track ended: advance the queue (repeats on loop-one).
     fn next(&mut self) {
-        let len = self.results.len();
-        let n = if self.player.shuffle {
-            // shortcut: clock-based pick, not uniform; swap for `rand` if quality matters.
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.subsec_nanos() as usize)
-                % len.max(1)
-        } else {
-            self.selected + 1
-        };
-        if n >= len {
-            self.player.stop();
-        } else {
-            self.select(n);
-            self.play_selected();
-        }
+        self.queue.next();
+        self.play_current();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -276,7 +276,7 @@ impl App {
             KeyCode::Enter => {
                 self.play_selected();
                 if !self.from_playlist
-                    && let Some(id) = self.playing_id.clone()
+                    && let Some(id) = self.queue.current().map(|t| t.id.clone())
                 {
                     self.spawn(async move {
                         let v = youtube::related(&id).await?;
@@ -289,15 +289,19 @@ impl App {
                     self.status = e.to_string();
                 }
             }
-            KeyCode::Char('n') => self.next(),
+            KeyCode::Char('n') => {
+                self.queue.skip();
+                self.play_current();
+            }
             KeyCode::Char(c @ ('+' | '-')) => {
                 if let Err(e) = self.player.volume(if c == '+' { 5 } else { -5 }) {
                     self.status = e.to_string();
                 }
             }
-            KeyCode::Char('s') => self.player.toggle_shuffle(),
+            KeyCode::Char('s') => self.queue.toggle_shuffle(),
             KeyCode::Char('l') => {
-                if let Err(e) = self.player.toggle_loop() {
+                self.queue.looping = self.queue.looping.cycle();
+                if let Err(e) = self.player.set_loop_file(self.queue.looping == Loop::One) {
                     self.status = e.to_string();
                 }
             }
@@ -383,7 +387,7 @@ mod tests {
             id: id.into(),
         };
         let mut a = app();
-        a.playing_id = Some("x".into());
+        a.queue.set(vec![t("x")], 0);
         a.tx.send(Msg::Related("old".into(), vec![t("o")])).unwrap();
         a.tick();
         assert_eq!(a.results.len(), 30); // stale: ignored
@@ -391,15 +395,17 @@ mod tests {
             .unwrap();
         a.tick();
         assert_eq!((a.results.len(), a.selected), (2, 0));
+        assert_eq!(a.queue.skip().map(|t| t.id.as_str()), Some("y")); // current not re-queued
     }
 
     #[test]
     fn next_stops_at_end_of_list() {
         let mut a = app();
+        a.queue.set(a.results.clone(), 29);
         a.select(29);
         a.next();
         assert_eq!(a.selected, 29);
-        assert!(a.player.now_playing.is_none());
+        assert!(a.queue.current().is_none() && a.player.now_playing.is_none());
     }
 
     fn press(a: &mut App, c: KeyCode) {
@@ -430,11 +436,11 @@ mod tests {
         press(&mut a, KeyCode::Char('j'));
         assert_eq!(a.selected, 1);
         press(&mut a, KeyCode::Char('s'));
-        assert!(a.player.shuffle);
-        press(&mut a, KeyCode::Char('l'));
-        assert!(a.player.looping);
-        press(&mut a, KeyCode::Char('l'));
-        assert!(!a.player.looping);
+        assert!(a.queue.shuffle);
+        for want in [Loop::All, Loop::One, Loop::Off] {
+            press(&mut a, KeyCode::Char('l'));
+            assert_eq!(a.queue.looping, want);
+        }
         press(&mut a, KeyCode::Char('?'));
         assert_eq!(a.screen, Screen::Help);
         press(&mut a, KeyCode::Esc);

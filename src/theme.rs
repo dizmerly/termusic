@@ -16,6 +16,7 @@ pub const ICON_PLAY: &str = "▶";
 pub const ICON_PAUSE: &str = "⏸";
 pub const ICON_SHUFFLE: &str = "⤮";
 pub const ICON_LOOP: &str = "↻";
+pub const ICON_LOOP_ONE: &str = "↻1";
 pub const ICON_BUSY: &str = "⟳";
 
 pub const PINK: Color = Color::Rgb(255, 105, 180);

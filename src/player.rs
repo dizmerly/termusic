@@ -12,9 +12,6 @@ use std::{
 #[derive(Debug, Default)]
 pub struct Player {
     pub playing: bool,
-    pub shuffle: bool,
-    /// Repeat the current track (mpv `loop-file`).
-    pub looping: bool,
     pub now_playing: Option<String>,
     running: Option<Running>,
 }
@@ -35,11 +32,11 @@ fn app_sock() -> PathBuf {
     sock(std::process::id())
 }
 
-fn mpv_command(url: &str, sock: &std::path::Path, looping: bool) -> Command {
+fn mpv_command(url: &str, sock: &std::path::Path, loop_file: bool) -> Command {
     let mut c = Command::new("mpv");
     c.args(["--no-video", "--no-terminal", "--ytdl-format=bestaudio"])
         .arg(format!("--input-ipc-server={}", sock.display()))
-        .args(looping.then_some("--loop-file=inf"))
+        .args(loop_file.then_some("--loop-file=inf"))
         .arg(url);
     c
 }
@@ -67,10 +64,11 @@ pub fn missing_deps() -> Option<String> {
 }
 
 impl Player {
-    pub fn play(&mut self, t: &Track) -> Result<()> {
+    /// Play `t`; `loop_file` repeats it until told otherwise (`set_loop_file`).
+    pub fn play(&mut self, t: &Track, loop_file: bool) -> Result<()> {
         self.stop();
         let url = format!("https://www.youtube.com/watch?v={}", t.id);
-        let mpv = quiet(mpv_command(&url, &app_sock(), self.looping))
+        let mpv = quiet(mpv_command(&url, &app_sock(), loop_file))
             .spawn()
             .context("cannot start mpv (mpv and yt-dlp must be on PATH)")?;
         self.attach(mpv, &t.title)
@@ -131,15 +129,10 @@ impl Player {
         self.ipc(&format!(r#"["add","volume",{delta}]"#))
     }
 
-    /// Flip looping; applies to the track already playing too.
-    pub fn toggle_loop(&mut self) -> Result<()> {
-        self.looping = !self.looping;
-        let v = if self.looping { "inf" } else { "no" };
+    /// Repeat (or stop repeating) the track already playing.
+    pub fn set_loop_file(&self, on: bool) -> Result<()> {
+        let v = if on { "inf" } else { "no" };
         self.ipc(&format!(r#"["set_property","loop-file","{v}"]"#))
-    }
-
-    pub fn toggle_shuffle(&mut self) {
-        self.shuffle = !self.shuffle;
     }
 
     /// If mpv exited by itself: `Some(true)` for a normal end, `Some(false)` for an

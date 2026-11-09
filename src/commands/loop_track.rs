@@ -2,4 +2,4 @@
 pub const ENABLED: bool = true;
 pub const NAME: &str = "loop";
 pub const KEY: char = 'l';
-pub const DESCRIPTION: &str = "Toggle looping the current track (l for loop).";
+pub const DESCRIPTION: &str = "Cycle loop: off / all / one (l for loop).";

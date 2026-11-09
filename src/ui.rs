@@ -1,5 +1,6 @@
 //! Rendering. Reads `App`, never mutates state (except the visible page size).
 use crate::app::{App, Screen};
+use crate::queue::Loop;
 use crate::theme::{self, fg};
 use crate::{commands, youtube::Track};
 use ratatui::{
@@ -118,11 +119,13 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!(" {icon} "), fg(color).bold()),
         Span::styled(text, fg(color)),
     ];
-    if app.player.shuffle {
+    if app.queue.shuffle {
         spans.push(Span::raw(format!(" {}", theme::ICON_SHUFFLE)));
     }
-    if app.player.looping {
-        spans.push(Span::raw(format!(" {}", theme::ICON_LOOP)));
+    match app.queue.looping {
+        Loop::Off => {}
+        Loop::All => spans.push(Span::raw(format!(" {}", theme::ICON_LOOP))),
+        Loop::One => spans.push(Span::raw(format!(" {}", theme::ICON_LOOP_ONE))),
     }
     if app.busy {
         spans.push(Span::styled(

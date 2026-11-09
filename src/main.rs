@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod net;
 mod player;
+mod queue;
 mod theme;
 mod ui;
 mod youtube;
