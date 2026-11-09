@@ -296,6 +296,12 @@ impl App {
                 }
             }
             KeyCode::Char('n') => self.skip(),
+            KeyCode::Char('a') if self.screen == Screen::Results => {
+                if let Some(t) = self.results.get(self.selected).cloned() {
+                    self.status = format!("queued: {}", t.title);
+                    self.queue.add(t);
+                }
+            }
             KeyCode::Char(c @ ('+' | '-')) => {
                 if let Err(e) = self.player.volume(if c == '+' { 5 } else { -5 }) {
                     self.status = e.to_string();
@@ -409,6 +415,19 @@ mod tests {
         a.next();
         assert_eq!(a.selected, 29);
         assert!(a.queue.current().is_none() && a.player.now_playing.is_none());
+    }
+
+    #[test]
+    fn a_queues_selected_without_playing() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('j'));
+        press(&mut a, KeyCode::Char('a'));
+        assert_eq!(a.status, "queued: 1");
+        assert!(a.queue.current().is_none() && a.player.now_playing.is_none());
+        assert_eq!(a.queue.upcoming().count(), 1);
+        a.screen = Screen::Playlists;
+        press(&mut a, KeyCode::Char('a')); // ignored on playlists
+        assert_eq!(a.queue.upcoming().count(), 1);
     }
 
     fn press(a: &mut App, c: KeyCode) {

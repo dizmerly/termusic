@@ -46,6 +46,7 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 | Key | Action |
 |-----|--------|
 | `Enter` | Play the highlighted track and replace the list with its YouTube mix (related tracks; `n` follows it). Playlists: open the playlist, which keeps its own order |
+| `a` | Add the highlighted result to the queue (plays after the current track, before the mix) |
 | `p` | Pause / resume |
 | `n` | Next track |
 | `s` | Toggle shuffle |
@@ -61,6 +62,7 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 
 ### Playback
 - Plays one track at a time through `mpv --no-video`, controlled over mpv's IPC socket.
+- A line above the status bar shows `next:` and the next three tracks. Tracks you add with `a` keep their place when the mix replaces the rest; with nothing playing they only wait (`n` starts the first).
 - Playing a track queues the tracks after it in the list; when a track ends the next one starts. At the end the queue stops (loop off), starts over (loop all), or the track repeats (loop one; `n` still skips).
 - Shuffle reorders the upcoming tracks, never the one playing. Turning it off keeps the shuffled order.
 - If mpv exits within ~3 seconds (usually a missing `yt-dlp`), termusic shows an error instead of skipping through the list.

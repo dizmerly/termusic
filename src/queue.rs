@@ -27,6 +27,8 @@ impl Loop {
 pub struct Queue {
     current: Option<Track>,
     upcoming: VecDeque<Track>,
+    /// Leading entries of `upcoming` the user queued; they survive `set_upcoming` and shuffle.
+    user_added: usize,
     history: Vec<Track>,
     pub looping: Loop,
     pub shuffle: bool,
@@ -56,18 +58,25 @@ impl Queue {
         self.set_upcoming(tracks.into_iter().skip(start).collect());
     }
 
-    /// Replace what plays after the current track (shuffled if shuffle is on).
+    /// Replace what plays after the current track (shuffled if shuffle is on);
+    /// tracks the user queued stay at the front.
     pub fn set_upcoming(&mut self, tracks: Vec<Track>) {
-        self.upcoming = tracks.into();
+        self.upcoming.truncate(self.user_added);
+        self.upcoming.extend(tracks);
         if self.shuffle {
             self.shuffle_upcoming();
         }
     }
 
-    /// Queue a track at the end; never interrupts or starts playback.
-    #[allow(dead_code)] // shortcut: no key binds it yet; wire an "add to queue" key when the UI gets one
+    /// Queue a track after the ones already user-queued (before any mix); never interrupts or starts playback.
     pub fn add(&mut self, t: Track) {
-        self.upcoming.push_back(t);
+        self.upcoming.insert(self.user_added, t);
+        self.user_added += 1;
+    }
+
+    /// Tracks that play after the current one, in order.
+    pub fn upcoming(&self) -> impl Iterator<Item = &Track> {
+        self.upcoming.iter()
     }
 
     /// Advance and return the track to play: the same one on `Loop::One`, `None` at the end.
@@ -86,6 +95,7 @@ impl Queue {
             self.set_upcoming(all);
         }
         self.current = self.upcoming.pop_front();
+        self.user_added = self.user_added.saturating_sub(1);
         self.current.as_ref()
     }
 
@@ -97,10 +107,11 @@ impl Queue {
         }
     }
 
-    /// Fisher-Yates over `upcoming` only; `current` is never touched.
+    /// Fisher-Yates over `upcoming` after the user-queued tracks; `current` is never touched.
     pub fn shuffle_upcoming(&mut self) {
-        for i in (1..self.upcoming.len()).rev() {
-            let j = self.rand_below(i + 1);
+        let from = self.user_added;
+        for i in (from + 1..self.upcoming.len()).rev() {
+            let j = from + self.rand_below(i + 1 - from);
             self.upcoming.swap(i, j);
         }
     }
@@ -167,6 +178,34 @@ mod tests {
         q.add(t("a"));
         assert_eq!(q.current(), None);
         assert_eq!(id(q.next()), Some("a"));
+    }
+
+    #[test]
+    fn queued_tracks_keep_order_and_survive_set_upcoming() {
+        let mut q = q(&["a", "b"], 0);
+        q.toggle_shuffle();
+        q.add(t("x"));
+        q.add(t("y"));
+        assert_eq!(ids(&q)[..2], ["x", "y"]);
+        q.set_upcoming(vec![t("m1"), t("m2")]); // the mix arrives
+        assert_eq!(ids(&q)[..2], ["x", "y"]);
+        assert_eq!(q.upcoming().count(), 4);
+        assert_eq!(id(q.skip()), Some("x"));
+        q.add(t("z")); // goes after y, before the mix
+        assert_eq!(ids(&q)[..2], ["y", "z"]);
+        q.skip();
+        q.skip();
+        q.set_upcoming(vec![t("n")]); // nothing user-queued left: fully replaced
+        assert_eq!(ids(&q), ["n"]);
+    }
+
+    #[test]
+    fn skip_with_nothing_current_starts_first_upcoming() {
+        let mut q = Queue::new();
+        q.add(t("a"));
+        q.add(t("b"));
+        assert_eq!(id(q.skip()), Some("a"));
+        assert_eq!(ids(&q), ["b"]);
     }
 
     #[test]

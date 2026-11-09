@@ -12,7 +12,10 @@ use ratatui::{
 };
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let [logo, body, bar] = Layout::vertical([
+    let show_next = app.screen != Screen::Help
+        && f.area().height >= 12
+        && app.queue.upcoming().next().is_some();
+    let [logo, body, next, bar] = Layout::vertical([
         // Logo only when there's room; Help needs every row.
         Constraint::Length(if app.screen == Screen::Help || f.area().height < 20 {
             0
@@ -20,6 +23,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             6
         }),
         Constraint::Min(3),
+        Constraint::Length(u16::from(show_next)),
         Constraint::Length(1),
     ])
     .areas(f.area());
@@ -106,7 +110,25 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
     }
 
+    if show_next {
+        draw_next(f, app, next);
+    }
     draw_bar(f, app, bar);
+}
+
+/// `next: A · B · C` for the next three tracks, cut to the width.
+fn draw_next(f: &mut Frame, app: &App, area: Rect) {
+    let titles: Vec<&str> = app
+        .queue
+        .upcoming()
+        .take(3)
+        .map(|t| t.title.as_str())
+        .collect();
+    let text = fit(
+        &format!(" next: {}", titles.join(" · ")),
+        area.width as usize,
+    );
+    f.render_widget(Paragraph::new(Span::styled(text, fg(theme::CYAN))), area);
 }
 
 fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -217,7 +239,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Span::styled(d, fg(theme::CYAN)),
         ])
     };
-    let mut lines = vec![head("Commands"), Line::raw("")];
+    let mut lines = vec![head("Commands")];
     for c in commands::enabled() {
         lines.push(key(
             commands::key_label(c.key),
@@ -275,6 +297,26 @@ mod tests {
         let s = render(&mut a, 80, 24);
         assert!(s.contains(theme::ICON_SHUFFLE));
         assert!(s.contains(theme::ICON_LOOP_ONE));
+    }
+
+    #[test]
+    fn up_next_line_shows_three_and_hides_on_help_or_short() {
+        let mut a = App::new();
+        a.screen = Screen::Results;
+        assert!(!render(&mut a, 80, 24).contains("next:"));
+        for n in ["one", "two", "three", "four"] {
+            a.queue.add(Track {
+                title: n.into(),
+                channel: String::new(),
+                id: n.into(),
+            });
+        }
+        assert!(render(&mut a, 80, 24).contains("next: one · two · three"));
+        assert!(!render(&mut a, 80, 24).contains("four"));
+        assert!(!render(&mut a, 80, 11).contains("next:"));
+        render(&mut a, 10, 12); // narrow must not panic
+        a.screen = Screen::Help;
+        assert!(!render(&mut a, 80, 24).contains("next:"));
     }
 
     #[test]

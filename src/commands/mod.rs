@@ -3,6 +3,7 @@ pub mod help;
 pub mod loop_track;
 pub mod pause;
 pub mod play;
+pub mod queue;
 pub mod quit;
 pub mod search;
 pub mod shuffle;
@@ -23,11 +24,12 @@ macro_rules! entry {
     };
 }
 
-fn all() -> [(bool, Command); 10] {
+fn all() -> [(bool, Command); 11] {
     entry!(
         play,
         pause,
         skip,
+        queue,
         shuffle,
         loop_track,
         volume_up,
@@ -66,7 +68,7 @@ mod tests {
     fn every_enabled_command_is_listed_once() {
         let keys: Vec<_> = super::enabled().iter().map(|c| c.key).collect();
         assert!(keys.contains(&'p') && !super::disabled('p'));
-        assert_eq!(keys.len(), 10);
+        assert_eq!(keys.len(), 11);
         assert!(keys.contains(&'l'));
     }
 }
