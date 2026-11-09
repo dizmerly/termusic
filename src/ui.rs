@@ -249,12 +249,10 @@ fn draw_help(f: &mut Frame, area: Rect) {
     lines.extend([
         Line::raw(""),
         head("Navigation (lists)"),
-        key("j / ↓".into(), "move down".into()),
-        key("k / ↑".into(), "move up".into()),
+        key("j/k ↓/↑".into(), "move down / up".into()),
         key("PgDn/Up".into(), "move one page".into()),
         key("g / G".into(), "jump to first / last".into()),
         key("P".into(), "your playlists (Enter opens one)".into()),
-        Line::raw(""),
         Line::styled("Esc, ? or q closes this screen.", theme::dim()),
     ]);
     f.render_widget(

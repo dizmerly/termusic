@@ -41,6 +41,14 @@ fn mpv_command(url: &str, sock: &std::path::Path, loop_file: bool) -> Command {
     c
 }
 
+fn volume_json(delta: i32) -> String {
+    format!(r#"["add","volume",{delta}]"#)
+}
+
+fn seek_json(delta: i32) -> String {
+    format!(r#"["seek",{delta},"relative"]"#)
+}
+
 /// Polls once a second; once the app or mpv is gone, kills mpv and removes its socket.
 const WATCHDOG: &str = r#"while kill -0 "$1" 2>/dev/null && kill -0 "$2" 2>/dev/null; do sleep 1; done
 kill "$2" 2>/dev/null; rm -f "$3""#;
@@ -126,7 +134,12 @@ impl Player {
     }
 
     pub fn volume(&self, delta: i32) -> Result<()> {
-        self.ipc(&format!(r#"["add","volume",{delta}]"#))
+        self.ipc(&volume_json(delta))
+    }
+
+    /// Jump `delta` seconds (negative = back) in the current track.
+    pub fn seek(&self, delta: i32) -> Result<()> {
+        self.ipc(&seek_json(delta))
     }
 
     /// Repeat (or stop repeating) the track already playing.
@@ -258,6 +271,13 @@ mod tests {
             .is_some())));
         assert_eq!(p.tick(), Some(false)); // exited within 3s: failure, not a normal end
         assert!(p.running.is_none());
+    }
+
+    #[test]
+    fn ipc_json() {
+        assert_eq!(volume_json(-5), r#"["add","volume",-5]"#);
+        assert_eq!(seek_json(5), r#"["seek",5,"relative"]"#);
+        assert_eq!(seek_json(-5), r#"["seek",-5,"relative"]"#);
     }
 
     #[test]

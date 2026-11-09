@@ -310,6 +310,11 @@ impl App {
                     self.status = e.to_string();
                 }
             }
+            KeyCode::Char(c @ (',' | '.')) => {
+                if let Err(e) = self.player.seek(if c == '.' { 5 } else { -5 }) {
+                    self.status = e.to_string();
+                }
+            }
             KeyCode::Char('s') => self.queue.toggle_shuffle(),
             KeyCode::Char('l') => {
                 self.queue.looping = self.queue.looping.cycle();

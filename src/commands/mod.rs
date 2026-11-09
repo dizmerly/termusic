@@ -6,6 +6,8 @@ pub mod play;
 pub mod queue;
 pub mod quit;
 pub mod search;
+pub mod seek_back;
+pub mod seek_forward;
 pub mod shuffle;
 pub mod skip;
 pub mod volume_down;
@@ -24,7 +26,7 @@ macro_rules! entry {
     };
 }
 
-fn all() -> [(bool, Command); 11] {
+fn all() -> [(bool, Command); 13] {
     entry!(
         play,
         pause,
@@ -34,6 +36,8 @@ fn all() -> [(bool, Command); 11] {
         loop_track,
         volume_up,
         volume_down,
+        seek_back,
+        seek_forward,
         search,
         help,
         quit
@@ -68,7 +72,7 @@ mod tests {
     fn every_enabled_command_is_listed_once() {
         let keys: Vec<_> = super::enabled().iter().map(|c| c.key).collect();
         assert!(keys.contains(&'p') && !super::disabled('p'));
-        assert_eq!(keys.len(), 11);
-        assert!(keys.contains(&'l'));
+        assert_eq!(keys.len(), 13);
+        assert!(keys.contains(&'l') && keys.contains(&',') && keys.contains(&'.'));
     }
 }

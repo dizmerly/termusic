@@ -52,6 +52,7 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 | `s` | Toggle shuffle |
 | `l` | Cycle loop: off / all (↻) / one (↻1) |
 | `+` / `-` | Volume up / down |
+| `,` / `.` | Seek back / forward 5s |
 | `/` | New search |
 | `P` | Your playlists |
 | `j` / `↓`, `k` / `↑` | Move selection |

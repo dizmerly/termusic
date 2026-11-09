@@ -55,6 +55,15 @@ impl Queue {
     pub fn set(&mut self, mut tracks: Vec<Track>, start: usize) {
         self.history.clear();
         self.current = (start < tracks.len()).then(|| tracks.remove(start));
+        // A queued copy of the new current track would play twice.
+        let queued = self
+            .current
+            .as_ref()
+            .and_then(|c| (self.upcoming.iter().take(self.user_added)).position(|t| t.id == c.id));
+        if let Some(i) = queued {
+            self.upcoming.remove(i);
+            self.user_added -= 1;
+        }
         self.set_upcoming(tracks.into_iter().skip(start).collect());
     }
 
@@ -95,7 +104,13 @@ impl Queue {
         self.history.extend(self.current.take());
         if self.upcoming.is_empty() && self.looping == Loop::All {
             let all = std::mem::take(&mut self.history);
+            let last = all.last().map(|t| t.id.clone());
             self.set_upcoming(all);
+            // The re-shuffle must not replay the track that just finished.
+            if self.upcoming.len() > 1 && self.upcoming.front().map(|t| &t.id) == last.as_ref() {
+                let j = 1 + self.rand_below(self.upcoming.len() - 1);
+                self.upcoming.swap(0, j);
+            }
         }
         self.current = self.upcoming.pop_front();
         self.user_added = self.user_added.saturating_sub(1);
@@ -318,6 +333,32 @@ mod tests {
         let mut want = refs[1..].to_vec();
         want.sort_unstable();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn set_to_a_queued_track_does_not_play_it_twice() {
+        let mut q = q(&["a"], 0);
+        q.add(t("x"));
+        q.add(t("y"));
+        q.set(vec![t("m"), t("x"), t("n")], 1); // Enter on queued x
+        assert_eq!(id(q.current()), Some("x"));
+        assert_eq!(ids(&q), ["y", "n"]);
+        assert_eq!(q.user_added, 1);
+        q.add(t("z")); // still lands after y, before the mix
+        assert_eq!(ids(&q), ["y", "z", "n"]);
+    }
+
+    #[test]
+    fn loop_all_shuffled_wrap_never_repeats_last_track() {
+        for seed in 1..200 {
+            let mut q = q(&["a", "b", "c"], 0);
+            q.rng = seed;
+            q.shuffle = true;
+            q.looping = Loop::All;
+            q.next();
+            let last = q.next().map(|t| t.id.clone());
+            assert_ne!(id(q.next()), last.as_deref(), "seed {seed}");
+        }
     }
 
     #[test]
