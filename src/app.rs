@@ -425,6 +425,9 @@ mod tests {
         assert_eq!(a.status, "queued: 1");
         assert!(a.queue.current().is_none() && a.player.now_playing.is_none());
         assert_eq!(a.queue.upcoming().count(), 1);
+        a.results.clear();
+        press(&mut a, KeyCode::Char('a')); // nothing selected: no panic, no change
+        assert_eq!(a.queue.upcoming().count(), 1);
         a.screen = Screen::Playlists;
         press(&mut a, KeyCode::Char('a')); // ignored on playlists
         assert_eq!(a.queue.upcoming().count(), 1);

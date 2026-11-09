@@ -62,7 +62,10 @@ impl Queue {
     /// tracks the user queued stay at the front.
     pub fn set_upcoming(&mut self, tracks: Vec<Track>) {
         self.upcoming.truncate(self.user_added);
-        self.upcoming.extend(tracks);
+        // A queued track repeated in the new list would play twice.
+        let queued: Vec<String> = self.upcoming.iter().map(|t| t.id.clone()).collect();
+        self.upcoming
+            .extend(tracks.into_iter().filter(|t| !queued.contains(&t.id)));
         if self.shuffle {
             self.shuffle_upcoming();
         }
@@ -197,6 +200,14 @@ mod tests {
         q.skip();
         q.set_upcoming(vec![t("n")]); // nothing user-queued left: fully replaced
         assert_eq!(ids(&q), ["n"]);
+    }
+
+    #[test]
+    fn set_upcoming_drops_duplicates_of_queued() {
+        let mut q = q(&["a"], 0);
+        q.add(t("x"));
+        q.set_upcoming(vec![t("m"), t("x")]);
+        assert_eq!(ids(&q), ["x", "m"]);
     }
 
     #[test]
