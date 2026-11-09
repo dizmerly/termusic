@@ -72,13 +72,24 @@ mod tests {
 
     #[test]
     fn cassette_lines_are_equal_width() {
-        let w = CASSETTE[0].chars().count();
-        assert!(CASSETTE.iter().all(|l| l.chars().count() == w));
+        use unicode_width::UnicodeWidthStr;
+        let w = CASSETTE[0].width();
+        assert!(CASSETTE.iter().all(|l| l.width() == w));
     }
 
     #[test]
     fn logo_lines_are_equal_width() {
         let w = LOGO[0].chars().count();
         assert!(LOGO.iter().all(|l| l.chars().count() == w));
+    }
+
+    #[test]
+    fn style_helpers_use_the_palette() {
+        assert_eq!(fg(CYAN).fg, Some(CYAN));
+        assert_eq!(title().fg, Some(PINK));
+        assert!(title().add_modifier.contains(Modifier::BOLD));
+        assert_eq!(selected().bg, Some(ROW_BG));
+        assert_eq!(dim().fg, Some(Color::DarkGray));
+        let _ = panel("t", GREEN); // builds without panicking
     }
 }

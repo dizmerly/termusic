@@ -1,5 +1,6 @@
 //! Rendering. Reads `App`, never mutates state (except the visible page size).
 use crate::app::{App, Row, Screen};
+use crate::history::Entry;
 use crate::queue::Loop;
 use crate::theme::{self, fg};
 use crate::{commands, youtube::Track};
@@ -121,7 +122,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Screen::Help => draw_help(f, app, body),
         Screen::Settings => draw_settings(f, app, body),
         Screen::History => {
-            let rows: Vec<Track> = app.history.iter().map(|e| e.track.clone()).collect();
+            let rows: Vec<Track> = app.history.iter().map(history_row).collect();
             let title = "History · Enter replays from where you stopped · Esc back";
             draw_list(f, app, &rows, title, theme::YELLOW, body);
         }
@@ -293,7 +294,7 @@ fn draw_list(
             .take(app.page)
             .map(|(i, t)| {
                 let sel = i == app.selected;
-                let channel = fit(&t.channel, 24);
+                let channel = fit(&t.channel, 28);
                 // 3 marker + 3 index + 2 gap columns; the channel always stays visible.
                 let room = (inner.width as usize).saturating_sub(8 + channel.chars().count());
                 let marker = match (sel, app.player.now_playing.as_deref() == Some(&t.title)) {
@@ -320,6 +321,14 @@ fn draw_list(
     };
     f.render_widget(block, area);
     f.render_widget(List::new(items), inner);
+}
+
+/// History entry as a list row: the channel column shows the short link and resume time.
+fn history_row(e: &Entry) -> Track {
+    Track {
+        channel: format!("youtu.be/{} {}", e.track.id, mmss(e.position_secs as f64)),
+        ..e.track.clone()
+    }
 }
 
 /// Truncate to `n` chars with an ellipsis.
@@ -486,13 +495,14 @@ mod tests {
 
     #[test]
     fn cassette_shows_when_roomy_hides_when_small_and_spins() {
+        use unicode_width::UnicodeWidthStr;
         let text = |l: &[Line]| l.iter().map(|l| l.to_string()).collect::<Vec<_>>();
         let (a, b) = (text(&cassette_lines(0)), text(&cassette_lines(1)));
         assert_ne!(a, b);
         assert_eq!(a, text(&cassette_lines(theme::REEL_FRAMES.len())));
         assert!(a.iter().all(|l| !l.contains('@')));
-        let w = a[0].chars().count();
-        assert!(a.iter().all(|l| l.chars().count() == w));
+        let w = a[0].width();
+        assert!(a.iter().all(|l| l.width() == w));
 
         let mut app = App::blank();
         app.screen = Screen::Search;
@@ -584,7 +594,7 @@ mod tests {
             },
         );
         let s = render(&mut a, 80, 24);
-        assert!(s.contains("Old song") && s.contains("Chan"));
+        assert!(s.contains("Old song") && s.contains("youtu.be/"));
         a.screen = Screen::Settings;
         a.history_path = Some("/very/long/".repeat(20).into());
         let s = render(&mut a, 80, 24);
@@ -681,6 +691,25 @@ mod tests {
         a.status = crate::app::LOGIN_HINT.into();
         let s = render(&mut a, 80, 24);
         assert!(s.contains(crate::app::LOGIN_HINT) && s.contains("F1 help"));
+    }
+
+    #[test]
+    fn history_rows_show_link_and_resume_time() {
+        let e = Entry {
+            track: Track {
+                title: "Old".into(),
+                channel: "Chan".into(),
+                id: "abc123".into(),
+            },
+            position_secs: 83,
+        };
+        assert_eq!(history_row(&e).channel, "youtu.be/abc123 01:23");
+        let mut app = App::blank();
+        app.screen = Screen::History;
+        app.history = vec![e];
+        let out = render(&mut app, 80, 24);
+        assert!(out.contains("Old") && out.contains("youtu.be/abc123 01:23"));
+        render(&mut app, 30, 6);
     }
 
     #[test]

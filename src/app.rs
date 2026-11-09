@@ -1305,6 +1305,11 @@ mod tests {
         a.queue.set(vec![track("a")], 0); // nothing follows
         a.sync_preload();
         assert!(a.player.preloaded_id().is_none());
+        // a preload of "b" while the queue now says nothing follows is dropped
+        a.player.fake_preload("b");
+        assert_eq!(a.player.preloaded_id(), Some("b"));
+        a.sync_preload();
+        assert!(a.player.preloaded_id().is_none());
     }
 
     #[test]

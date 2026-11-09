@@ -218,6 +218,14 @@ impl Player {
         self.next.as_ref().map(|n| n.id.as_str())
     }
 
+    /// Test hook: pretend `id` is preloaded (a `sleep` stands in for mpv).
+    #[cfg(test)]
+    pub(crate) fn fake_preload(&mut self, id: &str) {
+        let sock = self.next_sock();
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        self.next = Some(wrap(child, sock, id, id).unwrap());
+    }
+
     /// Whether a preload of `id` should start now.
     pub fn wants_preload(&self, id: &str) -> bool {
         let done = self.next.is_some() || self.tried.as_deref() == Some(id);
@@ -425,7 +433,7 @@ impl Player {
 /// Send one JSON command to the mpv listening on `sock`.
 fn ipc_to(sock: &std::path::Path, cmd: &str) -> Result<()> {
     UnixStream::connect(sock)
-        .and_then(|mut s| writeln!(s, "{{\"command\":{cmd}}}"))
+        .and_then(|mut s| s.write_all(format!("{{\"command\":{cmd}}}\n").as_bytes())) // one write: atomic line
         .context("mpv not ready yet")
 }
 
@@ -877,10 +885,10 @@ mod tests {
         let l = std::os::unix::net::UnixListener::bind(&p).unwrap();
         let h = std::thread::spawn(move || {
             let (mut s, _) = l.accept().unwrap();
-            let mut buf = [0u8; 512];
-            let n = std::io::Read::read(&mut s, &mut buf).unwrap();
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut line).unwrap();
             s.write_all(reply.as_bytes()).unwrap();
-            String::from_utf8_lossy(&buf[..n]).into_owned()
+            line
         });
         (p, h)
     }
@@ -961,5 +969,31 @@ mod tests {
         let n = drain(&ln);
         assert!(n.contains(&pause_json(true)) && n.contains(&volume_json(0)));
         p.stop();
+    }
+
+    #[test]
+    fn set_loop_file_sends_inf_or_no() {
+        let (mut p, [lc, _ln]) = rig("loopf");
+        p.set_loop_file(true).unwrap();
+        p.set_loop_file(false).unwrap();
+        let sent = drain(&lc);
+        assert!(
+            sent.contains(r#"["set_property","loop-file","inf"]"#),
+            "{sent}"
+        );
+        assert!(
+            sent.contains(r#"["set_property","loop-file","no"]"#),
+            "{sent}"
+        );
+        assert!(Player::default().set_loop_file(true).is_ok()); // nothing playing: no-op
+        p.stop();
+    }
+
+    #[test]
+    fn missing_deps_names_only_what_is_absent() {
+        // depends on the machine's PATH: just check the message shape
+        if let Some(m) = missing_deps() {
+            assert!(m.starts_with("missing ") && (m.contains("mpv") || m.contains("yt-dlp")));
+        }
     }
 }

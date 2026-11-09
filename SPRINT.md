@@ -55,7 +55,7 @@ Plan: `~/.claude/plans/optimized-launching-eagle.md`. Each item: 3 iterations (c
 - Item 9 (cassette look): base art in `theme::CASSETTE` (Search screen, reels spin while playing); the user will refine it. See Package D in `docs/SPRINT2-OVERVIEW.md`.
 
 ## Overnight summary
-- Branch `sprint-3-overnight`, 24+ commits ahead of `main`; nothing pushed, `main` untouched. `cargo clippy -- -D warnings` clean, `cargo test` 67 passing at the end.
+- Branch `sprint-3-overnight`, 24+ commits ahead of `main`; nothing pushed, `main` untouched. `cargo clippy -- -D warnings` clean, `cargo test` 67 passing at the end of the overnight run (129 after Package D).
 - Judge scores: 8, 8.5, 8, 8, 8 (after 3 extra rounds), 8 (item 6).
 - Verified live in a pty (real mpv, yt-dlp, network): search, play, next/prev, queue add + "next:" line, shuffle/loop icons, seek key, help at 100x30, logged-out playlists message, no mpv left running after quit (checked after every capture).
 - **Not verified:** real Google login/refresh/playlists; PKCE accepted by Google; media keys; seek audibly changing position of a YouTube track (IPC JSON verified against a local mpv only); loop-file toggled live on a real track; Playlist Enter→play path (no real playlist); 80x24 visuals only through render tests, screenshots are 100x30.
@@ -72,4 +72,4 @@ Plan: `~/.claude/plans/optimized-launching-eagle.md`. Each item: 3 iterations (c
 - Next track's mpv starts paused and silent about 20 s before the end (own socket and watchdog), fades in over the last 4 s while the old one fades out (200 ms IPC steps from `tick`, equal-power, user volume as ceiling), then is promoted without a gap; `n` promotes a ready preload instantly. Stale or failed preloads fall back to the cold spawn. `Player` is `current` + `next`. Verified live in a pty via `ps`/IPC read-back (one mpv after the switch, none after quit); not verified by ear. Details in `docs/SPRINT2-OVERVIEW.md`.
 
 ## Package D: cassette, test sweep (sprint-3 overnight)
-- Base cassette art on the Search screen (swap `theme::CASSETTE`), 125 tests after a per-function sweep, honest note on the missing menu bar widget code. Details and the covered/skipped table in `docs/SPRINT2-OVERVIEW.md`.
+- Base cassette art on the Search screen (swap `theme::CASSETTE`), 129 tests after a per-function sweep, honest note on the missing menu bar widget code. Details and the covered/skipped table in `docs/SPRINT2-OVERVIEW.md`.
