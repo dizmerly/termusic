@@ -105,7 +105,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         Screen::Playlists => {
             let rows = std::mem::take(&mut app.playlists);
-            draw_list(f, app, &rows, "Playlists · Enter opens", theme::GREEN, body);
+            draw_list(f, app, &rows, "Playlists · Enter plays", theme::GREEN, body);
             app.playlists = rows;
         }
     }
@@ -252,7 +252,6 @@ fn draw_help(f: &mut Frame, area: Rect) {
         key("j/k ↓/↑".into(), "move down / up".into()),
         key("PgDn/Up".into(), "move one page".into()),
         key("g / G".into(), "jump to first / last".into()),
-        key("P".into(), "your playlists (Enter opens one)".into()),
         Line::styled("Esc, ? or q closes this screen.", theme::dim()),
     ]);
     f.render_widget(

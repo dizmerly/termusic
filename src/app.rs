@@ -19,7 +19,11 @@ pub enum Msg {
     /// Related tracks for the video id they were fetched for.
     Related(String, Vec<Track>),
     Playlists(Vec<Track>),
+    /// Items of the playlist the user opened: they become the queue and start playing.
+    PlaylistTracks(Vec<Track>),
 }
+
+const LOGIN_HINT: &str = "Playlists need you to be logged in — press P again to sign in";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -122,8 +126,20 @@ impl App {
     }
 
     fn open_playlists(&mut self) {
-        if !auth::is_logged_in() {
-            self.screen = Screen::Login;
+        self.open_playlists_as(auth::is_logged_in());
+    }
+
+    /// Logged out: soft-fail with a hint; asking again while the hint shows opens the Login screen.
+    fn open_playlists_as(&mut self, logged_in: bool) {
+        if commands::disabled(commands::playlists::KEY) {
+            return;
+        }
+        if commands::requires_login(commands::playlists::KEY) && !logged_in {
+            if self.status == LOGIN_HINT {
+                self.screen = Screen::Login;
+            } else {
+                self.status = LOGIN_HINT.into();
+            }
             return;
         }
         self.screen = Screen::Playlists;
@@ -170,6 +186,11 @@ impl App {
                     }
                 }
                 Msg::Playlists(v) => self.playlists = v,
+                Msg::PlaylistTracks(v) => {
+                    if self.load_playlist(v) {
+                        self.play_current();
+                    }
+                }
             }
         }
         match self.player.tick() {
@@ -180,6 +201,21 @@ impl App {
             }
             None => {}
         }
+    }
+
+    /// Show a playlist and make it the queue, in order. False (nothing changed) if it is empty.
+    fn load_playlist(&mut self, tracks: Vec<Track>) -> bool {
+        if tracks.is_empty() {
+            self.status = "playlist is empty".into();
+            return false;
+        }
+        self.status.clear();
+        self.from_playlist = true;
+        self.queue.set(tracks.clone(), 0);
+        self.results = tracks;
+        self.screen = Screen::Results;
+        self.select(0);
+        true
     }
 
     fn play_selected(&mut self) {
@@ -250,6 +286,7 @@ impl App {
                 KeyCode::Esc if !self.results.is_empty() => self.screen = Screen::Results,
                 KeyCode::Esc => self.quit = true,
                 KeyCode::F(1) => self.open_help(),
+                KeyCode::F(2) => self.open_playlists(),
                 _ => {}
             },
             Screen::Login => match key.code {
@@ -290,8 +327,9 @@ impl App {
             KeyCode::Enter if self.screen == Screen::Playlists => {
                 if let Some(p) = self.playlists.get(self.selected) {
                     let id = p.id.clone();
-                    self.from_playlist = true;
-                    self.spawn(async move { Ok(Msg::Tracks(youtube::playlist_items(&id).await?)) });
+                    self.spawn(async move {
+                        Ok(Msg::PlaylistTracks(youtube::playlist_items(&id).await?))
+                    });
                 }
             }
             KeyCode::Enter => {
@@ -325,7 +363,7 @@ impl App {
                 let r = self.player.set_loop_file(self.queue.looping == Loop::One);
                 self.show_err(r);
             }
-            KeyCode::Char('P') => self.open_playlists(),
+            KeyCode::Char('P') | KeyCode::F(2) => self.open_playlists(),
             KeyCode::Char('/') | KeyCode::Esc => self.screen = Screen::Search,
             KeyCode::Char('?') => self.open_help(),
             KeyCode::Char('q') => self.quit = true,
@@ -483,5 +521,41 @@ mod tests {
         assert_eq!(a.screen, Screen::Results);
         press(&mut a, KeyCode::Char('q'));
         assert!(a.quit);
+    }
+
+    #[test]
+    fn logged_out_playlists_hint_then_login() {
+        let mut a = app();
+        a.open_playlists_as(false);
+        assert_eq!((a.screen, a.status.as_str()), (Screen::Results, LOGIN_HINT));
+        a.open_playlists_as(false); // asking again opens the Login screen
+        assert_eq!(a.screen, Screen::Login);
+    }
+
+    #[test]
+    fn playlist_replaces_queue_in_order() {
+        let mut a = app();
+        a.screen = Screen::Playlists;
+        let v: Vec<Track> = ["a", "b", "c"]
+            .map(|id| Track {
+                title: id.into(),
+                channel: String::new(),
+                id: id.into(),
+            })
+            .into();
+        assert!(a.load_playlist(v));
+        assert_eq!(
+            (a.screen, a.results.len(), a.selected),
+            (Screen::Results, 3, 0)
+        );
+        assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("a"));
+        assert_eq!(a.queue.upcoming().count(), 2);
+        assert!(a.from_playlist); // Enter on a track won't swap in the related mix
+        a.tx.send(Msg::PlaylistTracks(Vec::new())).unwrap(); // empty: queue untouched
+        a.tick();
+        assert_eq!(
+            (a.status.as_str(), a.queue.upcoming().count()),
+            ("playlist is empty", 2)
+        );
     }
 }
