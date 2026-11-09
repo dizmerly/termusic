@@ -65,6 +65,8 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 - Plays one track at a time through `mpv --no-video`, controlled over mpv's IPC socket.
 - A line above the status bar shows `next:` and the next three tracks. Tracks you add with `a` keep their place when the mix replaces the rest; with nothing playing they only wait (`n` starts the first).
 - Playing a track queues the tracks after it in the list; when a track ends the next one starts. At the end the queue stops (loop off), starts over (loop all), or the track repeats (loop one; `n` still skips).
+- `,` / `.` seek 5 seconds back / forward in the current track (nothing happens when idle).
+- With loop all and shuffle, each lap is reshuffled and never starts with the track that just ended. Pressing `Enter` on a track you queued plays it once, not again from the queue.
 - Shuffle reorders the upcoming tracks, never the one playing. Turning it off keeps the shuffled order.
 - If mpv exits within ~3 seconds (usually a missing `yt-dlp`), termusic shows an error instead of skipping through the list.
 - The bottom bar shows what's playing (▶ / ⏸), shuffle and loop state, a working indicator during network calls, and status or error messages.

@@ -204,6 +204,13 @@ impl App {
     }
 
     /// Queue the highlighted result without starting playback.
+    /// Player command failures go to the status bar.
+    fn show_err(&mut self, r: anyhow::Result<()>) {
+        if let Err(e) = r {
+            self.status = e.to_string();
+        }
+    }
+
     fn queue_selected(&mut self) {
         if let Some(t) = self.results.get(self.selected).cloned() {
             self.status = format!("queued: {}", t.title);
@@ -299,28 +306,24 @@ impl App {
                 }
             }
             KeyCode::Char('p') => {
-                if let Err(e) = self.player.toggle_pause() {
-                    self.status = e.to_string();
-                }
+                let r = self.player.toggle_pause();
+                self.show_err(r);
             }
             KeyCode::Char('n') => self.skip(),
             KeyCode::Char('a') if self.screen == Screen::Results => self.queue_selected(),
             KeyCode::Char(c @ ('+' | '-')) => {
-                if let Err(e) = self.player.volume(if c == '+' { 5 } else { -5 }) {
-                    self.status = e.to_string();
-                }
+                let r = self.player.volume(if c == '+' { 5 } else { -5 });
+                self.show_err(r);
             }
             KeyCode::Char(c @ (',' | '.')) => {
-                if let Err(e) = self.player.seek(if c == '.' { 5 } else { -5 }) {
-                    self.status = e.to_string();
-                }
+                let r = self.player.seek(if c == '.' { 5 } else { -5 });
+                self.show_err(r);
             }
             KeyCode::Char('s') => self.queue.toggle_shuffle(),
             KeyCode::Char('l') => {
                 self.queue.looping = self.queue.looping.cycle();
-                if let Err(e) = self.player.set_loop_file(self.queue.looping == Loop::One) {
-                    self.status = e.to_string();
-                }
+                let r = self.player.set_loop_file(self.queue.looping == Loop::One);
+                self.show_err(r);
             }
             KeyCode::Char('P') => self.open_playlists(),
             KeyCode::Char('/') | KeyCode::Esc => self.screen = Screen::Search,
