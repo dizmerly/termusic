@@ -74,7 +74,6 @@ fn run_tui() -> Result<()> {
         Ok(())
     })();
     ratatui::restore();
-    app.settings.volume = app.player.volume;
-    app.settings.save();
+    app.shutdown();
     res
 }

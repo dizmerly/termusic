@@ -1,5 +1,5 @@
 //! Rendering. Reads `App`, never mutates state (except the visible page size).
-use crate::app::{App, Screen};
+use crate::app::{App, Row, Screen};
 use crate::queue::Loop;
 use crate::theme::{self, fg};
 use crate::{commands, youtube::Track};
@@ -103,10 +103,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Screen::Help => draw_help(f, app, body),
         Screen::Settings => draw_settings(f, app, body),
         Screen::History => {
-            let rows = std::mem::take(&mut app.history);
-            let title = "History · Enter replays from here · Esc back";
+            let rows: Vec<Track> = app.history.iter().map(|e| e.track.clone()).collect();
+            let title = "History · Enter replays from where you stopped · Esc back";
             draw_list(f, app, &rows, title, theme::YELLOW, body);
-            app.history = rows;
         }
         Screen::Results => {
             let title = format!(
@@ -204,10 +203,13 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(format!("  {}", app.status), fg(theme::ORANGE)));
     }
     // Right side: progress (only with a known length and room) then the help hint.
-    let hint = if area.width >= 70 && app.status.is_empty() {
-        "S settings · H history · ? help "
-    } else {
-        "? help "
+    // On Search the letters are text, so it shows the F-keys.
+    let search = app.screen == Screen::Search;
+    let hint = match (area.width >= 70 && app.status.is_empty(), search) {
+        (true, true) => "F3 settings · F4 history · F1 help ",
+        (true, false) => "S settings · H history · ? help ",
+        (false, true) => "F1 help ",
+        (false, false) => "? help ",
     };
     let mut right = vec![Span::styled(hint, fg(theme::PINK))];
     if let (Some(d), true) = (app.player.duration, area.width >= 60) {
@@ -387,12 +389,19 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
+    let room = (area.width as usize).saturating_sub(24);
     let path = app
-        .settings
-        .history_file()
-        .map_or_else(|| "(none)".into(), |p| p.display().to_string());
-    let row = |i: usize, label: &str, value: String| {
-        let sel = app.setting_row == i;
+        .history_path
+        .as_ref()
+        .map_or_else(|| "(none)".into(), |p| fit(&p.display().to_string(), room));
+    let n = app.history.len();
+    let clear = if app.confirm_clear {
+        "Enter again to confirm".to_owned()
+    } else {
+        format!("Enter ({n} track{})", if n == 1 { "" } else { "s" })
+    };
+    let row = |r: Row, label: &str, value: String| {
+        let sel = Row::ALL[app.setting_row] == r;
         let line = Line::from(vec![
             Span::styled(if sel { " ▶ " } else { "   " }, fg(theme::PINK)),
             Span::styled(format!("{label:<14}"), fg(theme::YELLOW)),
@@ -406,20 +415,16 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
     };
     let lines = vec![
         row(
-            0,
+            Row::Volume,
             "Volume",
             format!("{}%  (←/→ or -/+ changes it by 5)", app.player.volume),
         ),
-        row(1, "History file", path),
+        row(Row::HistoryFile, "History file", path),
         Line::styled(
             "                change: env TERMUSIC_HISTORY or `history_path` in settings.json",
             theme::dim(),
         ),
-        row(
-            2,
-            "Clear history",
-            format!("Enter ({} tracks)", app.history.len()),
-        ),
+        row(Row::ClearHistory, "Clear history", clear),
     ];
     f.render_widget(
         Paragraph::new(lines).block(theme::panel("Settings · j/k move · Esc back", theme::GREEN)),
@@ -445,19 +450,26 @@ mod tests {
 
     #[test]
     fn help_fits_80x24() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Help;
         let s = render(&mut a, 80, 24);
         assert!(s.contains("closes this screen"), "help clipped");
-        assert!(s.contains("Playback"));
+        for want in [
+            "Playback",
+            "play: Play the highlighted track",
+            "pause: Pause or resume",
+        ] {
+            assert!(s.contains(want), "{want}");
+        }
+        assert!(!s.contains("Keys")); // the rest scrolls
     }
 
     #[test]
     fn help_lists_every_command_and_key_when_scrolled() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Help;
         let mut all = String::new();
-        for scroll in [0, 8, 16, 24, 32] {
+        for scroll in [0, 8, 16, 24, u16::MAX] {
             a.help_scroll = scroll;
             all += &render(&mut a, 80, 24);
         }
@@ -478,7 +490,7 @@ mod tests {
 
     #[test]
     fn search_and_results_hints() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Search;
         assert!(render(&mut a, 80, 24).contains("Esc: quit"));
         a.results = vec![Track {
@@ -490,11 +502,13 @@ mod tests {
         a.screen = Screen::Results;
         let s = render(&mut a, 80, 24);
         assert!(s.contains("/ or Esc: search") && s.contains("S settings · H history"));
+        a.screen = Screen::Search; // letters are text there: the hint names the F-keys
+        assert!(render(&mut a, 80, 24).contains("F3 settings · F4 history"));
     }
 
     #[test]
     fn settings_and_history_render() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Settings;
         let s = render(&mut a, 80, 24);
         for w in [
@@ -507,13 +521,20 @@ mod tests {
         }
         a.screen = Screen::History;
         assert!(render(&mut a, 80, 24).contains("nothing here yet"));
-        a.history = vec![Track {
-            title: "Old song".into(),
-            channel: "Chan".into(),
-            id: "o".into(),
-        }];
+        crate::history::push(
+            &mut a.history,
+            Track {
+                title: "Old song".into(),
+                channel: "Chan".into(),
+                id: "o".into(),
+            },
+        );
         let s = render(&mut a, 80, 24);
         assert!(s.contains("Old song") && s.contains("Chan"));
+        a.screen = Screen::Settings;
+        a.history_path = Some("/very/long/".repeat(20).into());
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains("1 track)") && s.contains("…"));
     }
 
     #[test]
@@ -527,7 +548,7 @@ mod tests {
 
     #[test]
     fn volume_keeps_panel_corner_and_title_clear_of_progress() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Help;
         let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
         t.draw(|f| draw(f, &mut a)).unwrap();
@@ -541,13 +562,13 @@ mod tests {
 
     #[test]
     fn volume_and_progress_render() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.player.volume = 80;
         a.player.position = 65.0;
         a.player.duration = Some(185.0);
         let s = render(&mut a, 80, 24);
         assert!(s.contains("♪ ████████░░  80%"), "volume");
-        assert!(s.contains("01:05 / 03:05") && s.contains("? help"));
+        assert!(s.contains("01:05 / 03:05") && s.contains("help"));
         let s = render(&mut a, 50, 24); // narrow: no progress
         assert!(!s.contains("01:05") && s.contains("80%"));
         let s = render(&mut a, 30, 24); // tiny: no volume, no panic
@@ -557,7 +578,7 @@ mod tests {
 
     #[test]
     fn bar_shows_shuffle_and_loop_mode() {
-        let mut a = App::new();
+        let mut a = App::blank();
         assert!(!render(&mut a, 80, 24).contains(theme::ICON_LOOP));
         a.queue.toggle_shuffle();
         a.queue.looping = Loop::One;
@@ -568,7 +589,7 @@ mod tests {
 
     #[test]
     fn up_next_line_shows_three_and_hides_on_help_or_short() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Results;
         assert!(!render(&mut a, 80, 24).contains("next:"));
         for n in ["one", "two", "three", "four"] {
@@ -588,7 +609,7 @@ mod tests {
 
     #[test]
     fn long_titles_keep_channel_visible() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Results;
         a.results = vec![Track {
             title: "x".repeat(200),
@@ -601,10 +622,10 @@ mod tests {
 
     #[test]
     fn login_hint_fully_visible_on_search() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Search;
         a.status = crate::app::LOGIN_HINT.into();
         let s = render(&mut a, 80, 24);
-        assert!(s.contains(crate::app::LOGIN_HINT) && s.contains("? help"));
+        assert!(s.contains(crate::app::LOGIN_HINT) && s.contains("F1 help"));
     }
 }

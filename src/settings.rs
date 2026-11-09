@@ -49,16 +49,13 @@ fn resolve_history_path(
 }
 
 impl Settings {
-    /// The history file in use; `None` under test so tests never touch the real config.
-    pub fn history_file(&self) -> Option<PathBuf> {
-        if cfg!(test) {
-            return None;
-        }
-        resolve_history_path(
-            std::env::var_os("TERMUSIC_HISTORY"),
-            self.history_path.as_deref(),
-            config_dir(),
-        )
+    /// The history file in use; `env` is `$TERMUSIC_HISTORY`, `dir` the config dir.
+    pub fn history_file(
+        &self,
+        env: Option<std::ffi::OsString>,
+        dir: Option<PathBuf>,
+    ) -> Option<PathBuf> {
+        resolve_history_path(env, self.history_path.as_deref(), dir)
     }
 
     /// Missing or corrupt file gives the defaults.
@@ -142,6 +139,14 @@ mod tests {
             Some("/cfg/history.json".into())
         );
         assert_eq!(resolve_history_path(None, None, None), None);
-        assert_eq!(Settings::default().history_file(), None); // test mode
+        let set = Settings {
+            history_path: Some("/s.json".into()),
+            ..Settings::default()
+        };
+        assert_eq!(set.history_file(None, None), Some("/s.json".into()));
+        assert_eq!(
+            Settings::default().history_file(None, Some("/c".into())),
+            Some("/c/history.json".into())
+        );
     }
 }

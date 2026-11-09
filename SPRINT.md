@@ -64,3 +64,6 @@ Plan: `~/.claude/plans/optimized-launching-eagle.md`. Each item: 3 iterations (c
 - Persistent volume (`settings.json`, default 70, `--volume` on every mpv spawn, re-sent on the first successful poll), progress bar with `mm:ss / mm:ss` in the status bar (mpv `time-pos`/`duration` polled about once a second in one IPC round trip, 30ms timeouts), volume bar top-right on every screen (inset so panel corners stay intact; hidden below 40 columns).
 - Settings are written atomically (tmp + rename). `TERMUSIC_CONFIG_DIR` overrides the config dir, tokens included. Tests never read or write the real config dir.
 - Not verified live against a real mpv: the polling round trip.
+
+## Package B: navigation, help, settings, history (sprint-3 overnight, items 3, 5, 6, 9)
+- Esc/Tab on Search return to the results (hints in the panel titles and bottom bar); Help, Settings and History return to the screen under them through an overlay stack. Help is grouped and scrolls. New `Screen::Settings` (`S`/F3) and `Screen::History` (`H`/F4); `history.json` keeps the last 10 tracks with the position to resume (`mpv --start=N`). File writes go through one background helper (`bg`, serialized, inline without a tokio runtime). See `docs/SPRINT2-OVERVIEW.md` for details and gaps.

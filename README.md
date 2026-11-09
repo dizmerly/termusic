@@ -36,10 +36,12 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 | Screen | What it does |
 |--------|--------------|
 | Login | Optional Google sign-in (press `P` twice when signed out). Opens your browser; shows the URL while waiting. `Esc` goes back. |
-| Search | Text prompt. `Enter` runs the query (via `yt-dlp`, no account needed) and shows the top 30 results. `Esc` quits. |
+| Search | Text prompt. `Enter` runs the query (via `yt-dlp`, no account needed) and shows the top 30 results. `Esc` or `Tab` goes back to the results when there are some, otherwise `Esc` quits. |
 | Results | Scrollable list of tracks (title and channel). Text only, no thumbnails. |
 | Playlists | Your YouTube playlists (needs sign-in). `Enter` loads the playlist (first 50 tracks) as the queue, in order, and plays the first track; the list then shows it. |
-| Help | Lists every enabled command and keybinding. |
+| History | The last 10 played tracks (`H`, `F4` on Search). `Enter` replays from there, resuming where you stopped, and the queue follows history order. |
+| Settings | `S` (`F3` on Search): volume (`←`/`→` or `-`/`+`), history file path (`Enter` shows how to change it), clear history (`Enter` twice). |
+| Help | Lists every enabled command and keybinding, grouped; scrolls with `j`/`k`, `PgUp`/`PgDn`, `g`/`G`. |
 | Offline | Shown whenever a network action finds no connection. |
 
 ### Keys
@@ -59,6 +61,10 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 | `j` / `↓`, `k` / `↑` | Move selection |
 | `PgDn` / `PgUp` | Move one page |
 | `g` / `G` | Jump to first / last |
+| `S` (`F3` on Search) | Settings |
+| `H` (`F4` on Search) | History: last 10 played tracks; the file is `history.json` in the config dir, or set `TERMUSIC_HISTORY` / `history_path` in `settings.json` |
+| `Tab` | On Search: back to the results list |
+| `Esc` | Back: Search to results; Help, Settings and History to the screen they were opened from |
 | `?` (`F1` on the Search screen) | Help |
 | `q` | Quit (`Esc` on Search; `Ctrl+C` anywhere) |
 

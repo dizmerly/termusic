@@ -45,12 +45,19 @@ fn app_sock() -> PathBuf {
     sock(std::process::id())
 }
 
-fn mpv_command(url: &str, sock: &std::path::Path, loop_file: bool, volume: u8) -> Command {
+fn mpv_command(
+    url: &str,
+    sock: &std::path::Path,
+    loop_file: bool,
+    volume: u8,
+    start: u64,
+) -> Command {
     let mut c = Command::new("mpv");
     c.args(["--no-video", "--no-terminal", "--ytdl-format=bestaudio"])
         .arg(format!("--volume={volume}"))
         .arg(format!("--input-ipc-server={}", sock.display()))
         .args(loop_file.then_some("--loop-file=inf"))
+        .args((start > 0).then(|| format!("--start={start}")))
         .arg(url);
     c
 }
@@ -98,13 +105,19 @@ impl Player {
         }
     }
 
-    /// Play `t`; `loop_file` repeats it until told otherwise (`set_loop_file`).
-    pub fn play(&mut self, t: &Track, loop_file: bool) -> Result<()> {
+    /// Play `t` from `start` seconds; `loop_file` repeats it until told otherwise (`set_loop_file`).
+    pub fn play(&mut self, t: &Track, loop_file: bool, start: u64) -> Result<()> {
         self.stop();
         let url = format!("https://www.youtube.com/watch?v={}", t.id);
-        let mpv = quiet(mpv_command(&url, &app_sock(), loop_file, self.volume))
-            .spawn()
-            .context("cannot start mpv (mpv and yt-dlp must be on PATH)")?;
+        let mpv = quiet(mpv_command(
+            &url,
+            &app_sock(),
+            loop_file,
+            self.volume,
+            start,
+        ))
+        .spawn()
+        .context("cannot start mpv (mpv and yt-dlp must be on PATH)")?;
         self.attach(mpv, &t.title)
     }
 
@@ -400,15 +413,16 @@ mod tests {
         };
         let w = args(&watchdog_command(1, 2, s));
         assert_eq!(w[3..], ["1", "2", "/tmp/x.sock"]);
-        let m = args(&mpv_command("u", s, true, 42));
+        let m = args(&mpv_command("u", s, true, 42, 0));
         assert!(m.contains(&"--no-video".into()));
         assert!(m.contains(&"--loop-file=inf".into()));
         assert!(m.contains(&"--volume=42".into()));
         assert!(
-            !args(&mpv_command("u", s, false, 42))
+            !args(&mpv_command("u", s, false, 42, 0))
                 .iter()
-                .any(|a| a.starts_with("--loop"))
+                .any(|a| a.starts_with("--loop") || a.starts_with("--start"))
         );
+        assert!(args(&mpv_command("u", s, false, 42, 95)).contains(&"--start=95".into()));
         assert!(m.contains(&"--input-ipc-server=/tmp/x.sock".into()));
         assert_eq!(m.last().unwrap(), "u");
     }

@@ -1,6 +1,7 @@
 //! Application state and key handling.
 use crate::cmd::{self, Cmd, Event};
 use crate::commands;
+use crate::history::{self, Entry};
 use crate::player::Player;
 use crate::queue::{Loop, Queue};
 use crate::settings::Settings;
@@ -8,6 +9,8 @@ use crate::youtube::{self, Track};
 use crate::{auth, net};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::future::Future;
+use std::path::PathBuf;
+use std::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Results of background network tasks, applied to `App` by `tick`.
@@ -23,6 +26,25 @@ pub enum Msg {
     Playlists(Vec<Track>),
     /// Items of the playlist (by id) the user opened: they become the queue and start playing.
     PlaylistTracks(String, Vec<Track>),
+    /// A background file write failed.
+    SaveFailed(String),
+}
+
+/// Serializes background writes so they land in the order they were requested.
+static IO: Mutex<()> = Mutex::new(());
+
+/// Fire-and-forget file work off the UI thread. Without a tokio runtime (unit tests) it runs inline.
+fn bg(f: impl FnOnce() + Send + 'static) {
+    let run = move || {
+        let _g = IO.lock().unwrap_or_else(|e| e.into_inner());
+        f()
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) => {
+            h.spawn_blocking(run);
+        }
+        Err(_) => run(),
+    }
 }
 
 pub(crate) const LOGIN_HINT: &str = "Playlists need you to be logged in (P/F2: sign in)";
@@ -40,19 +62,28 @@ pub enum Screen {
 }
 
 impl Screen {
-    /// Screens opened on top of another one; Esc returns to `App::prev`.
+    /// Screens opened on top of another one; Esc returns to the screen below on `App::stack`.
     fn is_overlay(self) -> bool {
         matches!(self, Self::Help | Self::Settings | Self::History)
     }
 }
 
-/// Rows on the settings screen: volume, history file, clear history.
-const SETTING_ROWS: usize = 3;
+/// Rows on the settings screen, top to bottom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Row {
+    Volume,
+    HistoryFile,
+    ClearHistory,
+}
+
+impl Row {
+    pub const ALL: [Row; 3] = [Row::Volume, Row::HistoryFile, Row::ClearHistory];
+}
 
 pub struct App {
     pub screen: Screen,
-    /// Screen to return to when leaving help.
-    pub prev: Screen,
+    /// Screens under the current overlay, oldest first; Esc pops one.
+    stack: Vec<Screen>,
     pub input: String,
     pub results: Vec<Track>,
     pub playlists: Vec<Track>,
@@ -80,9 +111,16 @@ pub struct App {
     pub quit: bool,
     pub settings: Settings,
     /// Last played tracks, most recent first.
-    pub history: Vec<Track>,
-    /// Highlighted row on the settings screen.
+    pub history: Vec<Entry>,
+    pub history_path: Option<PathBuf>,
+    /// Highlighted row on the settings screen (index into `Row::ALL`).
     pub setting_row: usize,
+    /// Clear history was asked for once; the next Enter confirms.
+    pub confirm_clear: bool,
+    /// Id of the track mpv is playing, to store its position in the history.
+    playing_id: Option<String>,
+    /// Where the next `play_current` starts, in seconds (history replay).
+    resume_at: u64,
     /// First visible line of the help screen.
     pub help_scroll: u16,
     /// List selection and offset to restore when an overlay closes.
@@ -91,6 +129,21 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        let settings = Settings::load();
+        let path = settings.history_file(
+            std::env::var_os("TERMUSIC_HISTORY"),
+            crate::settings::config_dir(),
+        );
+        Self::with_paths(settings, path)
+    }
+
+    /// Tests use this with no path so they never touch the real config.
+    #[cfg(test)]
+    pub(crate) fn blank() -> Self {
+        Self::with_paths(Settings::default(), None)
+    }
+
+    fn with_paths(settings: Settings, history_path: Option<PathBuf>) -> Self {
         // Login is optional (only playlists need it), so we always start at Search.
         let screen = if net::is_online() {
             Screen::Search
@@ -98,12 +151,15 @@ impl App {
             Screen::Offline
         };
         let (tx, rx) = unbounded_channel();
-        let settings = Settings::load();
         Self {
-            history: settings
-                .history_file()
-                .map(|p| crate::history::load(&p))
+            history: history_path
+                .as_deref()
+                .map(history::load)
                 .unwrap_or_default(),
+            history_path,
+            confirm_clear: false,
+            playing_id: None,
+            resume_at: 0,
             player: Player::new(settings.volume),
             settings,
             setting_row: 0,
@@ -119,7 +175,7 @@ impl App {
             tx,
             rx,
             screen,
-            prev: screen,
+            stack: Vec::new(),
             input: String::new(),
             results: Vec::new(),
             selected: 0,
@@ -201,7 +257,7 @@ impl App {
     /// Apply finished background work and detect the end of the current track. Called every frame.
     pub fn tick(&mut self) {
         while let Ok(m) = self.rx.try_recv() {
-            if !matches!(m, Msg::LoginUrl(_)) {
+            if !matches!(m, Msg::LoginUrl(_) | Msg::SaveFailed(_)) {
                 self.busy = false;
             }
             match m {
@@ -212,6 +268,7 @@ impl App {
                     self.login_url = None;
                 }
                 Msg::LoginUrl(u) => self.login_url = Some(u),
+                Msg::SaveFailed(e) => self.status = e,
                 Msg::LoggedIn => {
                     self.login_url = None;
                     self.status = "signed in".into();
@@ -261,17 +318,22 @@ impl App {
     pub fn on_event(&mut self, e: Event) {
         match e {
             Event::TrackStarted(id) => {
+                self.playing_id = Some(id.clone());
                 if let Some(t) = self.queue.current().filter(|t| t.id == id).cloned() {
-                    crate::history::push(&mut self.history, t);
+                    history::push(&mut self.history, t);
                     self.save_history();
-                    if self.screen == Screen::History {
-                        self.select(0); // the playing track just moved to the top
-                    }
                 }
-                if !matches!(self.screen, Screen::Playlists | Screen::History)
-                    && let Some(i) = self.results.iter().position(|r| r.id == id)
-                {
-                    self.select(i);
+                if self.screen == Screen::History {
+                    self.select(0); // the playing track just moved to the top
+                }
+                if let Some(i) = self.results.iter().position(|r| r.id == id) {
+                    if !self.screen.is_overlay() {
+                        if self.screen != Screen::Playlists {
+                            self.select(i);
+                        }
+                    } else if self.stack.first() == Some(&Screen::Results) {
+                        self.saved_sel.0 = i; // the list under the overlay follows the track
+                    }
                 }
             }
             Event::TrackEnded => self.next(),
@@ -304,7 +366,7 @@ impl App {
             Cmd::Volume(d) => {
                 let r = self.player.change_volume(d);
                 self.settings.volume = self.player.volume;
-                self.settings.save();
+                self.save_settings();
                 r
             }
             Cmd::ToggleShuffle => {
@@ -343,11 +405,13 @@ impl App {
 
     /// Play the queue's current track (stop if there is none) and highlight it in the list.
     fn play_current(&mut self) {
+        self.record_position();
+        let start = std::mem::take(&mut self.resume_at);
         let Some(t) = self.queue.current().cloned() else {
             self.player.stop();
             return;
         };
-        match self.player.play(&t, self.queue.looping == Loop::One) {
+        match self.player.play(&t, self.queue.looping == Loop::One, start) {
             Ok(()) => self.on_event(Event::TrackStarted(t.id)),
             Err(e) => self.status = e.to_string(),
         }
@@ -394,7 +458,7 @@ impl App {
                     self.screen = Screen::Results
                 }
                 KeyCode::Esc => self.quit = true,
-                KeyCode::F(1) => self.open_help(),
+                KeyCode::F(1) => self.open(Screen::Help),
                 KeyCode::F(2) => self.open_playlists(),
                 KeyCode::F(3) => self.open(Screen::Settings),
                 KeyCode::F(4) => self.open(Screen::History),
@@ -404,7 +468,7 @@ impl App {
                 KeyCode::Enter if !self.busy => self.start_login(),
                 KeyCode::Esc => self.screen = Screen::Search,
                 KeyCode::Char('q') => self.quit = true,
-                KeyCode::Char('?') => self.open_help(),
+                KeyCode::Char('?') => self.open(Screen::Help),
                 _ => {}
             },
             Screen::Help => {
@@ -421,6 +485,7 @@ impl App {
                     KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(10),
                     KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
                     KeyCode::Char('g') | KeyCode::Home => self.help_scroll = 0,
+                    KeyCode::Char('G') | KeyCode::End => self.help_scroll = u16::MAX, // clamped by ui
                     _ => {}
                 }
             }
@@ -429,10 +494,42 @@ impl App {
         }
     }
 
-    fn save_history(&self) {
-        if let Some(p) = self.settings.history_file() {
-            crate::history::save(&p, &self.history);
+    /// Remember where the playing track is, so History can resume it.
+    fn record_position(&mut self) {
+        let Some(id) = self.playing_id.take() else {
+            return;
+        };
+        let pos = history::resume_point(self.player.position, self.player.duration);
+        if let Some(e) = self.history.iter_mut().find(|e| e.track.id == id) {
+            e.position_secs = pos;
         }
+    }
+
+    /// Save everything synchronously; called once on the way out.
+    pub fn shutdown(&mut self) {
+        self.record_position();
+        self.settings.volume = self.player.volume;
+        self.settings.save();
+        if let Some(p) = &self.history_path {
+            let _ = history::save(p, &self.history);
+        }
+    }
+
+    fn save_history(&self) {
+        let Some(p) = self.history_path.clone() else {
+            return;
+        };
+        let (h, tx) = (self.history.clone(), self.tx.clone());
+        bg(move || {
+            if let Err(e) = history::save(&p, &h) {
+                let _ = tx.send(Msg::SaveFailed(format!("history not saved: {e}")));
+            }
+        });
+    }
+
+    fn save_settings(&self) {
+        let s = self.settings.clone();
+        bg(move || s.save());
     }
 
     /// Open Help, Settings or History over the current screen (Esc comes back).
@@ -441,13 +538,21 @@ impl App {
             return;
         }
         if !self.screen.is_overlay() {
-            self.prev = self.screen;
+            self.stack.clear();
             self.saved_sel = (self.selected, self.offset);
+        }
+        // Reopening a screen already below us goes back to it instead of nesting.
+        match self.stack.iter().position(|&x| x == s) {
+            Some(i) => self.stack.truncate(i),
+            None => self.stack.push(self.screen),
         }
         self.screen = s;
         match s {
             Screen::Help => self.help_scroll = 0,
-            Screen::Settings => self.setting_row = 0,
+            Screen::Settings => {
+                self.setting_row = 0;
+                self.confirm_clear = false;
+            }
             Screen::History => {
                 self.offset = 0;
                 self.select(0);
@@ -456,36 +561,56 @@ impl App {
         }
     }
 
-    fn open_help(&mut self) {
-        self.open(Screen::Help);
+    /// Leave an overlay for the screen under it; a list gets its selection back.
+    fn close_overlay(&mut self) {
+        self.screen = self.stack.pop().unwrap_or(Screen::Search);
+        if !self.screen.is_overlay() {
+            self.offset = self.saved_sel.1;
+            self.select(self.saved_sel.0);
+        }
     }
 
-    /// Leave an overlay for the screen it was opened from, restoring that list's selection.
-    fn close_overlay(&mut self) {
-        self.screen = self.prev;
-        self.offset = self.saved_sel.1;
-        self.select(self.saved_sel.0);
+    /// Leave every overlay (before jumping to an unrelated screen).
+    fn close_all(&mut self) {
+        while self.screen.is_overlay() && !self.stack.is_empty() {
+            self.close_overlay();
+        }
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) {
+        let confirmed = std::mem::take(&mut self.confirm_clear);
+        let row = Row::ALL[self.setting_row];
         match key.code {
             KeyCode::Esc | KeyCode::F(3) | KeyCode::Char(commands::settings::KEY) => {
                 self.close_overlay()
             }
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('?') | KeyCode::F(1) => self.open_help(),
+            KeyCode::Char('?') | KeyCode::F(1) => self.open(Screen::Help),
+            KeyCode::Char(commands::history::KEY) | KeyCode::F(4) => self.open(Screen::History),
             KeyCode::Char('j') | KeyCode::Down => {
-                self.setting_row = (self.setting_row + 1).min(SETTING_ROWS - 1)
+                self.setting_row = (self.setting_row + 1).min(Row::ALL.len() - 1)
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.setting_row = self.setting_row.saturating_sub(1)
             }
             KeyCode::Left | KeyCode::Char('-') => self.dispatch(Cmd::Volume(-cmd::STEP)),
             KeyCode::Right | KeyCode::Char('+') => self.dispatch(Cmd::Volume(cmd::STEP)),
-            KeyCode::Enter if self.setting_row == 2 => {
+            KeyCode::Enter if row == Row::HistoryFile => {
+                self.status = format!(
+                    "history file: {} (change: env TERMUSIC_HISTORY or history_path in settings.json)",
+                    self.history_path
+                        .as_ref()
+                        .map_or("none".into(), |p| p.display().to_string())
+                );
+            }
+            KeyCode::Enter if row == Row::ClearHistory && confirmed => {
                 self.history.clear();
                 self.save_history();
                 self.status = "history cleared".into();
+            }
+            KeyCode::Enter if row == Row::ClearHistory => {
+                self.confirm_clear = true;
+                self.status = "press Enter again to clear the history".into();
             }
             _ => {}
         }
@@ -524,9 +649,14 @@ impl App {
                 }
             }
             KeyCode::Enter if self.screen == Screen::History => {
-                // Replay from here; the queue follows history order.
-                self.queue.set(self.history.clone(), self.selected);
-                self.play_current();
+                // Replay from here (and from where it stopped); the queue follows history order.
+                self.record_position();
+                if let Some(e) = self.history.get(self.selected) {
+                    self.resume_at = e.position_secs;
+                    let tracks = self.history.iter().map(|e| e.track.clone()).collect();
+                    self.queue.set(tracks, self.selected);
+                    self.play_current();
+                }
             }
             KeyCode::Enter => {
                 self.play_selected();
@@ -540,7 +670,10 @@ impl App {
                 }
             }
             KeyCode::Char('a') if self.screen == Screen::Results => self.queue_selected(),
-            KeyCode::Char('P') | KeyCode::F(2) => self.open_playlists(),
+            KeyCode::Char('P') | KeyCode::F(2) => {
+                self.close_all();
+                self.open_playlists()
+            }
             KeyCode::Esc | KeyCode::Char(commands::history::KEY) | KeyCode::F(4)
                 if self.screen == Screen::History =>
             {
@@ -548,8 +681,11 @@ impl App {
             }
             KeyCode::Char(commands::settings::KEY) | KeyCode::F(3) => self.open(Screen::Settings),
             KeyCode::Char(commands::history::KEY) | KeyCode::F(4) => self.open(Screen::History),
-            KeyCode::Char('/') | KeyCode::Esc => self.screen = Screen::Search,
-            KeyCode::Char('?') => self.open_help(),
+            KeyCode::Char('/') | KeyCode::Esc => {
+                self.close_all();
+                self.screen = Screen::Search
+            }
+            KeyCode::Char('?') => self.open(Screen::Help),
             KeyCode::Char('q') => self.quit = true,
             _ => {}
         }
@@ -581,7 +717,7 @@ mod tests {
     use super::*;
 
     fn app() -> App {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Results;
         a.results = (0..30)
             .map(|i| Track {
@@ -606,7 +742,7 @@ mod tests {
 
     #[test]
     fn messages_drive_screens() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.tx.send(Msg::Offline).unwrap();
         a.tick();
         assert_eq!(a.screen, Screen::Offline);
@@ -672,7 +808,7 @@ mod tests {
 
     #[test]
     fn search_typing_and_esc() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Search;
         a.results.clear();
         for c in "pq".chars() {
@@ -751,7 +887,7 @@ mod tests {
 
     #[test]
     fn f2_on_search_asks_for_login_but_p_is_text() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Search;
         press(&mut a, KeyCode::Char('P'));
         assert_eq!((a.input.as_str(), a.screen), ("P", Screen::Search));
@@ -880,12 +1016,14 @@ mod tests {
             press(&mut a, KeyCode::Esc);
             assert_eq!((a.screen, a.selected), (Screen::Results, 7), "{key:?}");
         }
-        // Toggle keys close their own screen; Help opened from Settings still returns to the list.
+        // Toggle keys close their own screen.
         press(&mut a, KeyCode::Char('H'));
         press(&mut a, KeyCode::Char('H'));
         assert_eq!(a.screen, Screen::Results);
         press(&mut a, KeyCode::Char('S'));
         press(&mut a, KeyCode::Char('?'));
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.screen, Screen::Settings); // Help returns to the overlay it came from
         press(&mut a, KeyCode::Esc);
         assert_eq!(a.screen, Screen::Results);
         // From Search the F-keys open them and Esc goes back to Search.
@@ -922,24 +1060,101 @@ mod tests {
         }
     }
 
+    fn ids(a: &App) -> Vec<&str> {
+        a.history.iter().map(|e| e.track.id.as_str()).collect()
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("termusic-app-{}-{tag}", std::process::id()))
+    }
+
     #[test]
     fn track_started_records_history_most_recent_first() {
         let mut a = app();
-        a.history.clear();
         for i in ["1", "2", "1"] {
             a.queue.set(a.results.clone(), i.parse().unwrap());
             a.on_event(Event::TrackStarted(i.into()));
         }
-        let ids: Vec<_> = a.history.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, ["1", "2"]);
+        assert_eq!(ids(&a), ["1", "2"]);
         a.on_event(Event::TrackStarted("not-current".into())); // not the queue's track: ignored
         assert_eq!(a.history.len(), 2);
     }
 
     #[test]
+    fn new_loads_history_and_changes_are_written() {
+        let dir = scratch("io");
+        let p = dir.join("h.json");
+        let t = |id: &str| Track {
+            title: id.into(),
+            channel: "c".into(),
+            id: id.into(),
+        };
+        let seed = vec![Entry {
+            track: t("old"),
+            position_secs: 77,
+        }];
+        history::save(&p, &seed).unwrap();
+        let mut a = App::with_paths(Settings::default(), Some(p.clone()));
+        assert_eq!(a.history, seed);
+        a.queue.set(vec![t("new")], 0);
+        a.on_event(Event::TrackStarted("new".into()));
+        let on_disk = history::load(&p);
+        assert_eq!(
+            on_disk
+                .iter()
+                .map(|e| e.track.id.as_str())
+                .collect::<Vec<_>>(),
+            ["new", "old"]
+        );
+        a.screen = Screen::Settings;
+        a.stack = vec![Screen::Results];
+        a.setting_row = 2;
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(history::load(&p).len(), 2); // first Enter only asks
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(std::fs::read_to_string(&p).unwrap().trim(), "[]");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_history_save_shows_in_status() {
+        let dir = scratch("fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, "x").unwrap();
+        let mut a = App::with_paths(Settings::default(), Some(file.join("h.json")));
+        a.save_history();
+        a.tick();
+        assert!(a.status.starts_with("history not saved"), "{}", a.status);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn position_is_recorded_and_replay_resumes() {
+        let mut a = app();
+        a.queue.set(a.results.clone(), 3);
+        a.on_event(Event::TrackStarted("3".into()));
+        a.player.position = 95.4;
+        a.player.duration = Some(300.0);
+        a.record_position();
+        assert_eq!(a.history[0].position_secs, 95);
+        assert!(a.playing_id.is_none());
+        a.record_position(); // nothing playing: no change
+        assert_eq!(a.history[0].position_secs, 95);
+        a.screen = Screen::History;
+        a.stack = vec![Screen::Results];
+        press(&mut a, KeyCode::Enter); // spawns mpv if installed; resume_at is consumed either way
+        assert_eq!(a.resume_at, 0);
+        assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("3"));
+        a.player.stop();
+    }
+
+    #[test]
     fn history_screen_lists_and_enter_queues_from_selection() {
         let mut a = app();
-        a.history = ["h0", "h1", "h2"].map(track).into();
+        for id in ["h2", "h1", "h0"] {
+            history::push(&mut a.history, track(id));
+        }
         press(&mut a, KeyCode::Char('H'));
         assert_eq!((a.len(), a.selected), (3, 0));
         press(&mut a, KeyCode::Char('j'));
@@ -947,15 +1162,15 @@ mod tests {
         // Playing h1 moves it to the top; the queue keeps the old order after it.
         assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("h1"));
         assert_eq!(a.queue.upcoming().next().map(|t| t.id.as_str()), Some("h2"));
-        assert_eq!(a.history[0].id, "h1");
+        assert_eq!(ids(&a)[0], "h1");
         assert_eq!((a.screen, a.selected), (Screen::History, 0));
         a.player.stop();
     }
 
     #[test]
-    fn settings_volume_and_clear_history() {
+    fn settings_volume_rows_and_confirmed_clear() {
         let mut a = app();
-        a.history = vec![track("x")];
+        history::push(&mut a.history, track("x"));
         a.player.volume = 50;
         press(&mut a, KeyCode::Char('S'));
         press(&mut a, KeyCode::Right);
@@ -965,18 +1180,92 @@ mod tests {
         press(&mut a, KeyCode::Char('-'));
         press(&mut a, KeyCode::Char('-'));
         assert_eq!(a.player.volume, 45);
-        press(&mut a, KeyCode::Enter); // row 0: nothing cleared
+        press(&mut a, KeyCode::Enter); // volume row: nothing cleared
         assert_eq!(a.history.len(), 1);
+        press(&mut a, KeyCode::Char('j'));
+        assert_eq!(Row::ALL[a.setting_row], Row::HistoryFile);
+        a.history_path = Some("/h.json".into());
+        press(&mut a, KeyCode::Enter);
+        assert!(a.status.contains("/h.json") && a.status.contains("TERMUSIC_HISTORY"));
         for _ in 0..5 {
             press(&mut a, KeyCode::Char('j')); // clamps at the last row
         }
-        assert_eq!(a.setting_row, SETTING_ROWS - 1);
+        assert_eq!(Row::ALL[a.setting_row], Row::ClearHistory);
         press(&mut a, KeyCode::Enter);
-        assert!(a.history.is_empty());
-        press(&mut a, KeyCode::Char('k'));
-        assert_eq!(a.setting_row, 1);
+        assert!(a.confirm_clear && a.history.len() == 1);
+        press(&mut a, KeyCode::Char('k')); // any other key cancels the confirmation
+        press(&mut a, KeyCode::Char('j'));
+        press(&mut a, KeyCode::Enter);
+        assert!(a.confirm_clear && a.history.len() == 1);
+        press(&mut a, KeyCode::Enter);
+        assert!(a.history.is_empty() && !a.confirm_clear);
         press(&mut a, KeyCode::Char('q'));
         assert!(a.quit);
+    }
+
+    #[test]
+    fn leaving_overlays_by_other_keys_restores_selection() {
+        let mut a = app();
+        a.select(7);
+        press(&mut a, KeyCode::Char('H'));
+        press(&mut a, KeyCode::Char('/'));
+        assert_eq!((a.screen, a.selected), (Screen::Search, 7));
+        assert!(a.stack.is_empty() || !a.screen.is_overlay());
+        press(&mut a, KeyCode::Esc);
+        assert_eq!((a.screen, a.selected), (Screen::Results, 7));
+        press(&mut a, KeyCode::Char('H'));
+        a.logged_in = Some(false);
+        press(&mut a, KeyCode::F(2));
+        assert_eq!((a.screen, a.selected), (Screen::Results, 7));
+    }
+
+    #[test]
+    fn help_and_settings_return_to_the_overlay_they_came_from() {
+        let mut a = app();
+        a.select(4);
+        press(&mut a, KeyCode::Char('H'));
+        press(&mut a, KeyCode::Char('?'));
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.screen, Screen::History);
+        press(&mut a, KeyCode::Char('S'));
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.screen, Screen::History);
+        press(&mut a, KeyCode::Char('S'));
+        press(&mut a, KeyCode::Char('H')); // reopening History goes back to it, not deeper
+        assert_eq!((a.screen, a.stack.len()), (Screen::History, 1));
+        press(&mut a, KeyCode::Esc);
+        assert_eq!((a.screen, a.selected), (Screen::Results, 4));
+    }
+
+    #[test]
+    fn selection_follows_track_started_during_overlay() {
+        let mut a = app();
+        a.select(2);
+        press(&mut a, KeyCode::Char('?'));
+        a.queue.set(a.results.clone(), 9);
+        a.on_event(Event::TrackStarted("9".into()));
+        press(&mut a, KeyCode::Esc);
+        assert_eq!((a.screen, a.selected), (Screen::Results, 9));
+    }
+
+    #[test]
+    fn help_g_jumps_to_bottom_and_top() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('?'));
+        press(&mut a, KeyCode::Char('G'));
+        assert_eq!(a.help_scroll, u16::MAX);
+        press(&mut a, KeyCode::Home);
+        assert_eq!(a.help_scroll, 0);
+    }
+
+    #[test]
+    fn background_writes_run_inline_without_runtime_and_in_order() {
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+        for i in 0..3 {
+            let l = log.clone();
+            bg(move || l.lock().unwrap().push(i));
+        }
+        assert_eq!(*log.lock().unwrap(), [0, 1, 2]);
     }
 
     #[test]
