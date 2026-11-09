@@ -44,6 +44,10 @@ pub struct App {
     pub playlists: Vec<Track>,
     /// `results` is an opened playlist (keeps its order; no related lookup on play).
     from_playlist: bool,
+    /// The logged-out hint was shown; asking for playlists again opens Login.
+    login_prompted: bool,
+    /// Test hook: overrides the on-disk login state.
+    logged_in: Option<bool>,
     /// Authorization page while waiting for the user to sign in.
     pub login_url: Option<String>,
     /// A network task is in flight.
@@ -73,6 +77,8 @@ impl App {
         Self {
             playlists: Vec::new(),
             from_playlist: false,
+            login_prompted: false,
+            logged_in: None,
             login_url: None,
             busy: false,
             tx,
@@ -110,7 +116,6 @@ impl App {
 
     fn run_search(&mut self) {
         let q = self.input.trim().to_owned();
-        self.from_playlist = false;
         self.spawn(async move { Ok(Msg::Tracks(youtube::search(&q).await?)) });
     }
 
@@ -126,23 +131,27 @@ impl App {
     }
 
     fn open_playlists(&mut self) {
-        self.open_playlists_as(auth::is_logged_in());
+        let logged_in = self.logged_in.unwrap_or_else(auth::is_logged_in);
+        self.open_playlists_as(logged_in);
     }
 
-    /// Logged out: soft-fail with a hint; asking again while the hint shows opens the Login screen.
+    /// Logged out: soft-fail with a hint; asking again opens the Login screen.
     fn open_playlists_as(&mut self, logged_in: bool) {
         if commands::disabled(commands::playlists::KEY) {
             return;
         }
         if commands::requires_login(commands::playlists::KEY) && !logged_in {
-            if self.status == LOGIN_HINT {
+            if self.login_prompted {
+                self.login_prompted = false;
                 self.status.clear();
                 self.screen = Screen::Login;
             } else {
+                self.login_prompted = true;
                 self.status = LOGIN_HINT.into();
             }
             return;
         }
+        self.login_prompted = false;
         self.screen = Screen::Playlists;
         self.select(0);
         self.spawn(async { Ok(Msg::Playlists(youtube::playlists().await?)) });
@@ -168,6 +177,7 @@ impl App {
                     self.open_playlists();
                 }
                 Msg::Tracks(v) => {
+                    self.from_playlist = false;
                     self.status = if v.is_empty() {
                         "no results".into()
                     } else {
@@ -187,9 +197,9 @@ impl App {
                     }
                 }
                 Msg::Playlists(v) => self.playlists = v,
-                // shortcut: applies even if the user moved on meanwhile; add an id check like Related if it bites.
+                // Ignored if the user left the Playlists screen while it loaded.
                 Msg::PlaylistTracks(v) => {
-                    if self.load_playlist(v) {
+                    if self.screen == Screen::Playlists && self.load_playlist(v) {
                         self.play_current();
                     }
                 }
@@ -326,7 +336,7 @@ impl App {
             KeyCode::PageUp => self.select(self.selected.saturating_sub(self.page)),
             KeyCode::Char('g') | KeyCode::Home => self.select(0),
             KeyCode::Char('G') | KeyCode::End => self.select(last),
-            KeyCode::Enter if self.screen == Screen::Playlists => {
+            KeyCode::Enter if self.screen == Screen::Playlists && !self.busy => {
                 if let Some(p) = self.playlists.get(self.selected) {
                     let id = p.id.clone();
                     self.spawn(async move {
@@ -530,8 +540,10 @@ mod tests {
         let mut a = app();
         a.open_playlists_as(false);
         assert_eq!((a.screen, a.status.as_str()), (Screen::Results, LOGIN_HINT));
+        assert!(a.login_prompted);
         a.open_playlists_as(false); // asking again opens the Login screen
         assert_eq!((a.screen, a.status.as_str()), (Screen::Login, ""));
+        assert!(!a.login_prompted);
     }
 
     #[test]
@@ -553,6 +565,7 @@ mod tests {
         assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("a"));
         assert_eq!(a.queue.upcoming().count(), 2);
         assert!(a.from_playlist); // Enter on a track won't swap in the related mix
+        a.screen = Screen::Playlists;
         a.tx.send(Msg::PlaylistTracks(Vec::new())).unwrap(); // empty: queue untouched
         a.tick();
         assert_eq!(
@@ -567,8 +580,30 @@ mod tests {
         a.screen = Screen::Search;
         press(&mut a, KeyCode::Char('P'));
         assert_eq!((a.input.as_str(), a.screen), ("P", Screen::Search));
-        a.status.clear();
-        a.open_playlists_as(false);
-        assert_eq!(a.status, LOGIN_HINT);
+        a.input.clear();
+        a.logged_in = Some(false);
+        press(&mut a, KeyCode::F(2));
+        assert_eq!((a.status.as_str(), a.screen), (LOGIN_HINT, Screen::Search));
+        press(&mut a, KeyCode::F(2));
+        assert_eq!(a.screen, Screen::Login);
+    }
+
+    #[test]
+    fn stale_playlist_reply_ignored_and_tracks_reset_flag() {
+        let t = |id: &str| Track {
+            title: id.into(),
+            channel: String::new(),
+            id: id.into(),
+        };
+        let mut a = app();
+        a.screen = Screen::Search;
+        a.tx.send(Msg::PlaylistTracks(vec![t("a")])).unwrap();
+        a.tick();
+        assert!(a.queue.current().is_none() && !a.from_playlist);
+        assert_eq!(a.results.len(), 30);
+        a.from_playlist = true;
+        a.tx.send(Msg::Tracks(vec![t("x")])).unwrap(); // a search reply clears the flag
+        a.tick();
+        assert!(!a.from_playlist);
     }
 }
