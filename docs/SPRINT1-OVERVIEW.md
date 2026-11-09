@@ -41,3 +41,4 @@ Certain errors and things to fix
 6. There isnt a settings menu yet, and if there is, there is no clear way to get to it. 
 7. Test coverage overall looks pretty good, but I want every single function to get unit tests, along with more comprehensive unit tests for other items. 
 8. It appears for every new song, the volume is defaulted to a preset rather than carrying across in relation to user settings. 
+9. I think a nice addition would be to have a customizable history file, where it shows the last 10 links for the songs that you played. This allows a user to open up a song back and start where they were playing from. 
