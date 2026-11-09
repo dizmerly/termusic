@@ -91,6 +91,23 @@ impl Queue {
         self.upcoming.iter()
     }
 
+    /// The track `next` would play, if known in advance (none on `Loop::One`, at the end,
+    /// or on a shuffled loop-all wrap, which reshuffles).
+    pub fn peek_next(&self) -> Option<&Track> {
+        let cur = self.current.as_ref()?;
+        match self.looping {
+            Loop::One => None,
+            Loop::Off => self.upcoming.front(),
+            Loop::All if self.shuffle => self.upcoming.front(),
+            Loop::All => Some(
+                self.upcoming
+                    .front()
+                    .or(self.history.first())
+                    .unwrap_or(cur),
+            ),
+        }
+    }
+
     /// Advance and return the track to play: the same one on `Loop::One`, `None` at the end.
     pub fn next(&mut self) -> Option<&Track> {
         if self.looping == Loop::One && self.current.is_some() {
@@ -174,6 +191,25 @@ mod tests {
         let mut q = Queue::new();
         q.set(ids.iter().map(|i| t(i)).collect(), start);
         q
+    }
+
+    #[test]
+    fn peek_next_matches_what_next_plays() {
+        assert_eq!(id(Queue::new().peek_next()), None); // empty
+        let mut a = q(&["a", "b"], 0);
+        assert_eq!(id(a.peek_next()), Some("b"));
+        a.looping = Loop::One;
+        assert_eq!(id(a.peek_next()), None);
+        a.looping = Loop::Off;
+        a.skip();
+        assert_eq!(id(a.peek_next()), None); // last track
+        a.looping = Loop::All;
+        assert_eq!(id(a.peek_next()), Some("a")); // wrap
+        let p = id(a.peek_next()).map(String::from);
+        assert_eq!(id(a.skip()), p.as_deref());
+        a.shuffle = true;
+        a.skip();
+        assert_eq!(id(a.peek_next()), None); // reshuffled wrap: unknown
     }
 
     fn id(t: Option<&Track>) -> Option<&str> {

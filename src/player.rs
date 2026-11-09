@@ -9,6 +9,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Start loading the next track this many seconds before the current one ends.
+pub const PRELOAD_SECS: f64 = 20.0;
+/// Length of the overlap in which the old track fades out and the next fades in.
+pub const CROSSFADE_SECS: f64 = 4.0;
+/// How often a fade step is sent over IPC.
+const FADE_STEP: Duration = Duration::from_millis(200);
+
 #[derive(Debug)]
 pub struct Player {
     pub playing: bool,
@@ -19,7 +26,22 @@ pub struct Player {
     pub position: f64,
     pub duration: Option<f64>,
     vol_synced: bool,
-    running: Option<Running>,
+    current: Option<Running>,
+    /// Preloaded next track: paused, volume 0, own socket.
+    next: Option<Running>,
+    /// Id of the last preload attempt, so a dead preload is not retried for the same track.
+    tried: Option<String>,
+    fade: Option<Fade>,
+    /// Counter for distinct socket names.
+    spawned: u32,
+}
+
+/// An in-progress crossfade between `current` and `next`.
+#[derive(Debug)]
+struct Fade {
+    start: Instant,
+    len: f64,
+    stepped: Instant,
 }
 
 impl Default for Player {
@@ -33,16 +55,32 @@ impl Default for Player {
 struct Running {
     mpv: Child,
     watchdog: Child,
+    sock: PathBuf,
+    id: String,
+    title: String,
     started: Instant,
     polled: Instant,
 }
 
-fn sock(app_pid: u32) -> PathBuf {
-    std::env::temp_dir().join(format!("termusic-mpv-{app_pid}.sock"))
+impl Running {
+    /// Kill mpv and its watchdog and remove the socket.
+    fn kill(mut self) {
+        for c in [&mut self.mpv, &mut self.watchdog] {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        let _ = std::fs::remove_file(&self.sock);
+    }
 }
 
-fn app_sock() -> PathBuf {
-    sock(std::process::id())
+/// Socket of the `n`th mpv started by app process `app_pid`.
+fn sock(app_pid: u32, n: u32) -> PathBuf {
+    std::env::temp_dir().join(format!("termusic-mpv-{app_pid}-{n}.sock"))
+}
+
+/// Unit tests must not start a real mpv (network, installed or not): `true` exits at once.
+fn mpv_program() -> &'static str {
+    if cfg!(test) { "true" } else { "mpv" }
 }
 
 fn mpv_command(
@@ -51,9 +89,11 @@ fn mpv_command(
     loop_file: bool,
     volume: u8,
     start: u64,
+    paused: bool,
 ) -> Command {
-    let mut c = Command::new("mpv");
+    let mut c = Command::new(mpv_program());
     c.args(["--no-video", "--no-terminal", "--ytdl-format=bestaudio"])
+        .args(paused.then_some("--pause=yes"))
         .arg(format!("--volume={volume}"))
         .arg(format!("--input-ipc-server={}", sock.display()))
         .args(loop_file.then_some("--loop-file=inf"))
@@ -64,6 +104,23 @@ fn mpv_command(
 
 fn volume_json(vol: u8) -> String {
     format!(r#"["set_property","volume",{vol}]"#)
+}
+
+fn pause_json(on: bool) -> String {
+    format!(r#"["set_property","pause",{on}]"#)
+}
+
+/// Whether to start loading the next track: it exists, none is loaded or tried yet,
+/// and the current track (duration known) is within `PRELOAD_SECS` of its end.
+pub fn should_preload(position: f64, duration: Option<f64>, next_exists: bool, done: bool) -> bool {
+    next_exists && !done && duration.is_some_and(|d| d > 0.0 && d - position <= PRELOAD_SECS)
+}
+
+/// Equal-power crossfade at `progress` (0..=1): (old, new) volumes, with `user` as the ceiling.
+pub fn fade_volumes(progress: f64, user: u8) -> (u8, u8) {
+    let a = progress.clamp(0.0, 1.0) * std::f64::consts::FRAC_PI_2;
+    let v = |f: f64| (f64::from(user) * f).round() as u8;
+    (v(a.cos()), v(a.sin()))
 }
 
 fn seek_json(delta: i32) -> String {
@@ -101,59 +158,109 @@ impl Player {
             position: 0.0,
             duration: None,
             vol_synced: false,
-            running: None,
+            current: None,
+            next: None,
+            tried: None,
+            fade: None,
+            spawned: 0,
         }
+    }
+
+    fn next_sock(&mut self) -> PathBuf {
+        self.spawned += 1;
+        sock(std::process::id(), self.spawned)
+    }
+
+    /// Spawn mpv for `t` (paused and silent when preloading) with its watchdog.
+    fn spawn(&mut self, t: &Track, loop_file: bool, start: u64, preload: bool) -> Result<Running> {
+        let sock = self.next_sock();
+        let url = format!("https://www.youtube.com/watch?v={}", t.id);
+        let vol = if preload { 0 } else { self.volume };
+        let mpv = quiet(mpv_command(&url, &sock, loop_file, vol, start, preload))
+            .spawn()
+            .context("cannot start mpv (mpv and yt-dlp must be on PATH)")?;
+        wrap(mpv, sock, &t.id, &t.title)
     }
 
     /// Play `t` from `start` seconds; `loop_file` repeats it until told otherwise (`set_loop_file`).
     pub fn play(&mut self, t: &Track, loop_file: bool, start: u64) -> Result<()> {
         self.stop();
-        let url = format!("https://www.youtube.com/watch?v={}", t.id);
-        let mpv = quiet(mpv_command(
-            &url,
-            &app_sock(),
-            loop_file,
-            self.volume,
-            start,
-        ))
-        .spawn()
-        .context("cannot start mpv (mpv and yt-dlp must be on PATH)")?;
-        self.attach(mpv, &t.title)
+        let r = self.spawn(t, loop_file, start, false)?;
+        self.set_current(r);
+        Ok(())
     }
 
-    /// Track an already-spawned mpv (or stand-in) and start its watchdog.
-    fn attach(&mut self, mut mpv: Child, title: &str) -> Result<()> {
-        match quiet(watchdog_command(std::process::id(), mpv.id(), &app_sock())).spawn() {
-            Ok(watchdog) => {
-                self.running = Some(Running {
-                    mpv,
-                    watchdog,
-                    started: Instant::now(),
-                    polled: Instant::now(),
-                });
-                self.position = 0.0;
-                self.duration = None;
-                self.vol_synced = false;
-                self.now_playing = Some(title.to_owned());
-                self.playing = true;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = mpv.kill(); // never leave an unwatched mpv behind
-                let _ = mpv.wait();
-                Err(e).context("cannot start watchdog (sh)")
-            }
+    fn set_current(&mut self, r: Running) {
+        self.now_playing = Some(r.title.clone());
+        self.current = Some(r);
+        self.position = 0.0;
+        self.duration = None;
+        self.vol_synced = false;
+        self.fade = None;
+        self.tried = None;
+        self.playing = true;
+    }
+
+    /// Start `t` paused and silent in the background, to be promoted when the current track ends.
+    pub fn preload(&mut self, t: &Track) {
+        self.discard_preload();
+        self.tried = Some(t.id.clone());
+        // A failed preload is silent: the cold path plays the track when its turn comes.
+        self.next = self.spawn(t, false, 0, true).ok();
+    }
+
+    /// Id of the track loaded in the background, if any.
+    pub fn preloaded_id(&self) -> Option<&str> {
+        self.next.as_ref().map(|n| n.id.as_str())
+    }
+
+    /// Whether a preload of `id` should start now.
+    pub fn wants_preload(&self, id: &str) -> bool {
+        let done = self.next.is_some() || self.tried.as_deref() == Some(id);
+        self.current.is_some() && should_preload(self.position, self.duration, true, done)
+    }
+
+    pub fn discard_preload(&mut self) {
+        if let Some(n) = self.next.take() {
+            n.kill();
         }
+        if self.fade.take().is_some() {
+            let _ = self.ipc(&volume_json(self.volume)); // the old track stays
+        }
+    }
+
+    /// Make the preloaded track `id` the current one at once (unpaused, at the user's volume).
+    /// False (preload dropped, caller plays cold) if there is none or it is not ready.
+    pub fn promote(&mut self, id: &str) -> bool {
+        if self.next.as_ref().is_none_or(|n| n.id != id) {
+            return false;
+        }
+        let n = self.next.take().expect("checked above");
+        let sent = |c: &str| ipc_to(&n.sock, c).is_ok();
+        if !(sent(&volume_json(self.volume)) && sent(&pause_json(false))) {
+            n.kill(); // socket not up yet: it would stay paused
+            return false;
+        }
+        if let Some(old) = self.current.take() {
+            old.kill();
+        }
+        self.set_current(n);
+        self.vol_synced = true;
+        true
     }
 
     pub fn stop(&mut self) {
-        if let Some(mut r) = self.running.take() {
-            for c in [&mut r.mpv, &mut r.watchdog] {
-                let _ = c.kill();
-                let _ = c.wait();
-            }
+        self.end_current();
+        self.discard_preload();
+        self.tried = None;
+    }
+
+    /// Kill the current mpv only; a preload survives to be promoted.
+    fn end_current(&mut self) {
+        if let Some(r) = self.current.take() {
+            r.kill();
         }
-        let _ = std::fs::remove_file(app_sock());
+        self.fade = None;
         self.playing = false;
         self.now_playing = None;
         self.position = 0.0;
@@ -162,17 +269,14 @@ impl Player {
 
     /// Send one JSON command to the running mpv (no-op when nothing is playing).
     fn ipc(&self, cmd: &str) -> Result<()> {
-        if self.running.is_some() {
-            UnixStream::connect(app_sock())
-                .and_then(|mut s| writeln!(s, "{{\"command\":{cmd}}}"))
-                .context("mpv not ready yet")?;
-        }
-        Ok(())
+        self.current
+            .as_ref()
+            .map_or(Ok(()), |r| ipc_to(&r.sock, cmd))
     }
 
     pub fn toggle_pause(&mut self) -> Result<()> {
         self.ipc(r#"["cycle","pause"]"#)?;
-        if self.running.is_some() {
+        if self.current.is_some() {
             self.playing = !self.playing;
         }
         Ok(())
@@ -181,6 +285,9 @@ impl Player {
     /// Change the volume by `delta` points (clamped); the new value sticks even if mpv isn't ready.
     pub fn change_volume(&mut self, delta: i32) -> Result<()> {
         self.volume = (i32::from(self.volume) + delta).clamp(0, 100) as u8;
+        if self.fade.is_some() {
+            return Ok(()); // the next fade step applies it, scaled
+        }
         self.ipc(&volume_json(self.volume))
     }
 
@@ -195,14 +302,20 @@ impl Player {
         self.ipc(&format!(r#"["set_property","loop-file","{v}"]"#))
     }
 
-    /// If mpv exited by itself: `Some(true)` for a normal end, `Some(false)` for an
-    /// immediate exit (mpv/yt-dlp failure) so the caller doesn't skip through the list.
+    /// If mpv exited by itself, or the crossfade finished: `Some(true)` for a normal end,
+    /// `Some(false)` for an immediate exit (mpv/yt-dlp failure) so the caller doesn't skip through the list.
+    /// After `Some(true)` the caller starts the next track, which promotes the preload if there is one.
     pub fn tick(&mut self) -> Option<bool> {
-        let r = self.running.as_mut()?;
+        if let Some(n) = self.next.as_mut()
+            && n.mpv.try_wait().ok().flatten().is_some()
+        {
+            self.discard_preload(); // dead preload: cold path later
+        }
+        let r = self.current.as_mut()?;
         if r.mpv.try_wait().ok().flatten().is_none() {
             if r.polled.elapsed() >= Duration::from_secs(1) {
                 r.polled = Instant::now();
-                let (pos, dur) = poll();
+                let (pos, dur) = poll(&r.sock);
                 if let Some(p) = pos {
                     self.position = p;
                 }
@@ -214,19 +327,89 @@ impl Player {
                     self.vol_synced = true;
                     let _ = self.ipc(&volume_json(self.volume));
                 }
+                self.maybe_start_fade();
             }
-            return None;
+            return self.step_fade();
         }
         let ok = r.started.elapsed() > Duration::from_secs(3);
-        self.stop();
+        if ok {
+            self.end_current();
+        } else {
+            self.stop();
+        }
         Some(ok)
+    }
+
+    /// Unpause the preload when the last `CROSSFADE_SECS` begin.
+    fn maybe_start_fade(&mut self) {
+        let (Some(n), Some(d)) = (&self.next, self.duration) else {
+            return;
+        };
+        let left = d - self.position;
+        if self.fade.is_none()
+            && left <= CROSSFADE_SECS
+            && ipc_to(&n.sock, &pause_json(false)).is_ok()
+        {
+            let now = Instant::now();
+            self.fade = Some(Fade {
+                start: now,
+                len: left.max(1.0),
+                stepped: now.checked_sub(FADE_STEP).unwrap_or(now),
+            });
+        }
+    }
+
+    /// Send the next fade step; `Some(true)` once the fade is complete.
+    fn step_fade(&mut self) -> Option<bool> {
+        let f = self.fade.as_mut()?;
+        if f.stepped.elapsed() < FADE_STEP {
+            return None;
+        }
+        f.stepped = Instant::now();
+        let p = f.start.elapsed().as_secs_f64() / f.len;
+        let (old, new) = fade_volumes(p, self.volume);
+        let _ = self.ipc(&volume_json(old));
+        if let Some(n) = &self.next {
+            let _ = ipc_to(&n.sock, &volume_json(new));
+        }
+        (p >= 1.0).then(|| {
+            self.fade = None;
+            true
+        })
+    }
+}
+
+/// Send one JSON command to the mpv listening on `sock`.
+fn ipc_to(sock: &std::path::Path, cmd: &str) -> Result<()> {
+    UnixStream::connect(sock)
+        .and_then(|mut s| writeln!(s, "{{\"command\":{cmd}}}"))
+        .context("mpv not ready yet")
+}
+
+/// Start the watchdog for `mpv` (killing it if that fails) and bundle them.
+fn wrap(mut mpv: Child, sock: PathBuf, id: &str, title: &str) -> Result<Running> {
+    match quiet(watchdog_command(std::process::id(), mpv.id(), &sock)).spawn() {
+        Ok(watchdog) => Ok(Running {
+            mpv,
+            watchdog,
+            sock,
+            id: id.to_owned(),
+            title: title.to_owned(),
+            started: Instant::now(),
+            polled: Instant::now(),
+        }),
+        Err(e) => {
+            let _ = mpv.kill(); // never leave an unwatched mpv behind
+            let _ = mpv.wait();
+            Err(e).context("cannot start watchdog (sh)")
+        }
     }
 }
 
 /// Query `time-pos` and `duration` in one round trip; short timeouts so the UI never stalls.
-fn poll() -> (Option<f64>, Option<f64>) {
+fn poll(sock: &std::path::Path) -> (Option<f64>, Option<f64>) {
     let t = Duration::from_millis(30);
-    let Ok(mut s) = UnixStream::connect(app_sock()) else {
+    let Ok(mut s) = UnixStream::connect(sock) else {
         return (None, None);
     };
     let _ = s.set_read_timeout(Some(t));
@@ -299,6 +482,11 @@ mod tests {
         Command::new("sleep").arg(secs).spawn().unwrap()
     }
 
+    fn fake(p: &mut Player, id: &str, secs: &str) -> Running {
+        let s = p.next_sock();
+        wrap(sleeper(secs), s, id, id).unwrap()
+    }
+
     fn temp_sock(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("termusic-test-{}-{tag}", std::process::id()));
         std::fs::write(&p, "").unwrap();
@@ -345,37 +533,124 @@ mod tests {
     #[test]
     fn stop_reaps_mpv_and_watchdog() {
         let mut p = Player::default();
-        p.attach(sleeper("60"), "t").unwrap();
+        let r = fake(&mut p, "t", "60");
+        p.set_current(r);
+        let r = fake(&mut p, "n", "60");
+        p.next = Some(r);
         assert!(p.playing);
-        let (m, w) = {
-            let r = p.running.as_ref().unwrap();
-            (r.mpv.id(), r.watchdog.id())
-        };
+        let pids: Vec<u32> = [&p.current, &p.next]
+            .iter()
+            .flat_map(|r| {
+                let r = r.as_ref().unwrap();
+                [r.mpv.id(), r.watchdog.id()]
+            })
+            .collect();
         p.stop();
-        assert!(p.running.is_none() && p.now_playing.is_none() && !p.playing);
-        assert!(!alive(m) && !alive(w));
+        assert!(p.current.is_none() && p.next.is_none() && p.now_playing.is_none() && !p.playing);
+        assert!(pids.iter().all(|&x| !alive(x)));
+    }
+
+    #[test]
+    fn socket_names_are_distinct() {
+        assert_ne!(sock(1, 1), sock(1, 2));
+        assert_ne!(sock(1, 1), sock(2, 1));
+        let mut p = Player::default();
+        assert_ne!(p.next_sock(), p.next_sock());
+    }
+
+    #[test]
+    fn preload_decision() {
+        let d = Some(200.0);
+        assert!(!should_preload(100.0, d, true, false)); // far from the end
+        assert!(should_preload(180.0, d, true, false)); // exactly PRELOAD_SECS left
+        assert!(should_preload(199.0, d, true, false));
+        assert!(!should_preload(199.0, d, false, false)); // empty queue / loop one
+        assert!(!should_preload(199.0, d, true, true)); // never twice
+        assert!(!should_preload(0.0, None, true, false)); // duration unknown
+    }
+
+    #[test]
+    fn fade_math() {
+        assert_eq!(fade_volumes(0.0, 80), (80, 0));
+        assert_eq!(fade_volumes(1.0, 80), (0, 80));
+        assert_eq!(fade_volumes(2.0, 80), (0, 80)); // clamped
+        assert_eq!(fade_volumes(-1.0, 80), (80, 0));
+        let (o, n) = fade_volumes(0.5, 100);
+        assert_eq!((o, n), (71, 71)); // equal power, never above the ceiling
+        let mut last = (101, 0);
+        for i in 0..=20 {
+            let (o, n) = fade_volumes(f64::from(i) / 20.0, 60);
+            assert!(o <= 60 && n <= 60 && o <= last.0 && n >= last.1);
+            last = (o, n);
+        }
+    }
+
+    #[test]
+    fn promote_needs_a_matching_ready_preload() {
+        let mut p = Player::default();
+        assert!(!p.promote("n")); // nothing preloaded
+        let r = fake(&mut p, "n", "60");
+        p.next = Some(r);
+        assert!(!p.promote("other"));
+        assert!(p.next.is_some());
+        // No mpv socket exists: not ready, so the preload is dropped for a cold start.
+        assert!(!p.promote("n"));
+        assert!(p.next.is_none());
+    }
+
+    #[test]
+    fn dead_preload_is_dropped_and_not_retried() {
+        let mut p = Player::default();
+        let r = fake(&mut p, "t", "60");
+        p.set_current(r);
+        let r = fake(&mut p, "n", "0");
+        p.next = Some(r);
+        p.tried = Some("n".into());
+        assert!(wait_until(|| p.tick().is_none() && p.next.is_none()));
+        assert!(p.current.is_some());
+        p.position = 190.0;
+        p.duration = Some(200.0);
+        assert!(!p.wants_preload("n"));
+        assert!(p.wants_preload("m"));
+        p.stop();
+    }
+
+    #[test]
+    fn natural_end_keeps_the_preload() {
+        let mut p = Player::default();
+        let mut r = fake(&mut p, "t", "0");
+        r.started = Instant::now() - Duration::from_secs(5); // not an early failure
+        p.current = Some(r);
+        let r = fake(&mut p, "n", "60");
+        p.next = Some(r);
+        assert!(wait_until(|| p.tick() == Some(true)));
+        assert!(p.current.is_none() && p.next.is_some());
+        p.stop();
     }
 
     #[test]
     fn tick_reports_running_and_early_exit() {
         let mut p = Player::default();
         assert_eq!(p.tick(), None); // nothing playing
-        p.attach(sleeper("60"), "t").unwrap();
+        let r = fake(&mut p, "t", "60");
+        p.set_current(r);
         assert_eq!(p.tick(), None);
         p.stop();
-        p.attach(sleeper("0"), "t").unwrap();
-        assert!(wait_until(|| p.running.as_mut().is_some_and(|r| r
+        let r = fake(&mut p, "t", "0");
+        p.set_current(r);
+        assert!(wait_until(|| p.current.as_mut().is_some_and(|r| r
             .mpv
             .try_wait()
             .unwrap()
             .is_some())));
         assert_eq!(p.tick(), Some(false)); // exited within 3s: failure, not a normal end
-        assert!(p.running.is_none());
+        assert!(p.current.is_none());
     }
 
     #[test]
     fn ipc_json() {
         assert_eq!(volume_json(80), r#"["set_property","volume",80]"#);
+        assert_eq!(pause_json(false), r#"["set_property","pause",false]"#);
         assert_eq!(seek_json(5), r#"["seek",5,"relative"]"#);
         assert_eq!(seek_json(-5), r#"["seek",-5,"relative"]"#);
     }
@@ -413,16 +688,19 @@ mod tests {
         };
         let w = args(&watchdog_command(1, 2, s));
         assert_eq!(w[3..], ["1", "2", "/tmp/x.sock"]);
-        let m = args(&mpv_command("u", s, true, 42, 0));
+        let m = args(&mpv_command("u", s, true, 42, 0, false));
         assert!(m.contains(&"--no-video".into()));
         assert!(m.contains(&"--loop-file=inf".into()));
         assert!(m.contains(&"--volume=42".into()));
         assert!(
-            !args(&mpv_command("u", s, false, 42, 0))
+            !args(&mpv_command("u", s, false, 42, 0, false))
                 .iter()
                 .any(|a| a.starts_with("--loop") || a.starts_with("--start"))
         );
-        assert!(args(&mpv_command("u", s, false, 42, 95)).contains(&"--start=95".into()));
+        assert!(args(&mpv_command("u", s, false, 42, 95, false)).contains(&"--start=95".into()));
+        assert!(!m.contains(&"--pause=yes".into()));
+        let pre = args(&mpv_command("u", s, false, 0, 0, true));
+        assert!(pre.contains(&"--pause=yes".into()) && pre.contains(&"--volume=0".into()));
         assert!(m.contains(&"--input-ipc-server=/tmp/x.sock".into()));
         assert_eq!(m.last().unwrap(), "u");
     }

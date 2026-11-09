@@ -307,10 +307,22 @@ impl App {
                 }
             }
         }
+        self.sync_preload();
         match self.player.tick() {
             Some(true) => self.on_event(Event::TrackEnded),
             Some(false) => self.on_event(Event::TrackFailed),
             None => {}
+        }
+    }
+
+    /// Keep the background preload matching the queue: drop a stale one, start one near the end.
+    fn sync_preload(&mut self) {
+        let want = self.queue.peek_next().cloned();
+        if self.player.preloaded_id() != want.as_ref().map(|t| t.id.as_str()) {
+            self.player.discard_preload(); // skip, prev, shuffle, loop or a new queue changed it
+        }
+        if let Some(t) = want.filter(|t| self.player.wants_preload(&t.id)) {
+            self.player.preload(&t);
         }
     }
 
@@ -411,7 +423,14 @@ impl App {
             self.player.stop();
             return;
         };
-        match self.player.play(&t, self.queue.looping == Loop::One, start) {
+        let one = self.queue.looping == Loop::One;
+        // A ready preload starts instantly; otherwise spawn cold.
+        let r = if start == 0 && !one && self.player.promote(&t.id) {
+            Ok(())
+        } else {
+            self.player.play(&t, one, start)
+        };
+        match r {
             Ok(()) => self.on_event(Event::TrackStarted(t.id)),
             Err(e) => self.status = e.to_string(),
         }
@@ -507,6 +526,7 @@ impl App {
 
     /// Save everything synchronously; called once on the way out.
     pub fn shutdown(&mut self) {
+        let _io = IO.lock().unwrap_or_else(|e| e.into_inner()); // after any background write
         self.record_position();
         self.settings.volume = self.player.volume;
         self.settings.save();
