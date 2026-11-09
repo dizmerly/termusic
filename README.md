@@ -77,6 +77,10 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 - Sign-in uses Google's loopback-redirect flow (Desktop-app client) with PKCE (S256); the client secret is sent only when configured. Tokens are stored in your config dir (`termusic/tokens.json`, mode `0600`) and refreshed automatically. If Google revokes the session you're logged out.
 - Read-only access: the app requests only the `youtube.readonly` scope.
 
+### Settings
+
+The volume is saved to `settings.json` in the config dir (same dir as `tokens.json`) and restored at startup (default 70). Set `TERMUSIC_CONFIG_DIR` to use another directory for settings and tokens.
+
 ### CLI
 ```sh
 termusic              # launch the TUI

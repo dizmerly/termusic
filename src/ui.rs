@@ -135,11 +135,12 @@ fn draw_volume(f: &mut Frame, vol: u8, area: Rect) {
         return;
     }
     let text = format!(
-        "{} {} {vol:>3}%",
+        " {} {} {vol:>3}%",
         theme::ICON_NOTE,
         bar(f64::from(vol) / 100.0, 10)
     );
-    let r = Rect::new(area.right() - W, area.y, W, 1);
+    // Inset 2 columns so a panel's corner stays intact when row 0 is its border.
+    let r = Rect::new(area.right() - W - 3, area.y, W + 1, 1);
     f.render_widget(Paragraph::new(Span::styled(text, fg(theme::PINK))), r);
 }
 
@@ -166,7 +167,7 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
     };
     let mut spans = vec![
         Span::styled(format!(" {icon} "), fg(color).bold()),
-        Span::styled(text, fg(color)),
+        Span::styled(text.to_owned(), fg(color)),
     ];
     let loop_icon = match app.queue.looping {
         Loop::Off => None,
@@ -203,6 +204,10 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
     let rw = right.iter().map(Span::width).sum::<usize>() as u16;
     let [left, right_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(rw)]).areas(area);
+    // Truncate the title with … so it never runs into the right side (1 col gap).
+    let other: usize = spans.iter().skip(2).map(Span::width).sum::<usize>() + spans[0].width();
+    let room = (left.width as usize).saturating_sub(other + 1);
+    spans[1] = Span::styled(fit(text, room), fg(color));
     f.render_widget(Block::new().style(Style::new().bg(theme::BAR_BG)), area);
     f.render_widget(Paragraph::new(Line::from(spans)), left);
     f.render_widget(Paragraph::new(Line::from(right)), right_area);
@@ -331,6 +336,20 @@ mod tests {
         assert_eq!(bar(-1.0, 4), "░░░░");
         assert_eq!(mmss(75.9), "01:15");
         assert_eq!(mmss(-3.0), "00:00");
+    }
+
+    #[test]
+    fn volume_keeps_panel_corner_and_title_clear_of_progress() {
+        let mut a = App::new();
+        a.screen = Screen::Help;
+        let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        t.draw(|f| draw(f, &mut a)).unwrap();
+        assert_eq!(t.backend().buffer()[(79, 0)].symbol(), "╮");
+        assert!(render(&mut a, 80, 24).contains("70%"));
+        a.player.now_playing = Some("T".repeat(120));
+        a.player.duration = Some(100.0);
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains("…") && s.contains("00:00 / 01:40"));
     }
 
     #[test]

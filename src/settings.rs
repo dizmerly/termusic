@@ -26,6 +26,10 @@ pub fn config_dir() -> Option<PathBuf> {
 }
 
 fn path() -> Option<PathBuf> {
+    // Tests must never touch the real config.
+    if cfg!(test) {
+        return None;
+    }
     config_dir().map(|d| d.join("settings.json"))
 }
 
@@ -55,7 +59,9 @@ impl Settings {
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d)?;
         }
-        std::fs::write(p, serde_json::to_vec_pretty(self)?)
+        let tmp = p.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        std::fs::rename(tmp, p)
     }
 }
 

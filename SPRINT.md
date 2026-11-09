@@ -59,3 +59,8 @@ Plan: `~/.claude/plans/optimized-launching-eagle.md`. Each item: 3 iterations (c
 - Judge scores: 8, 8.5, 8, 8, 8 (after 3 extra rounds), 8 (item 6).
 - Verified live in a pty (real mpv, yt-dlp, network): search, play, next/prev, queue add + "next:" line, shuffle/loop icons, seek key, help at 100x30, logged-out playlists message, no mpv left running after quit (checked after every capture).
 - **Not verified:** real Google login/refresh/playlists; PKCE accepted by Google; media keys; seek audibly changing position of a YouTube track (IPC JSON verified against a local mpv only); loop-file toggled live on a real track; Playlist Enter→play path (no real playlist); 80x24 visuals only through render tests, screenshots are 100x30.
+
+## Sprint 5 — Volume and progress
+- Persistent volume (`settings.json`, default 70, `--volume` on every mpv spawn, re-sent on the first successful poll), progress bar with `mm:ss / mm:ss` in the status bar (mpv `time-pos`/`duration` polled about once a second in one IPC round trip, 30ms timeouts), volume bar top-right on every screen (inset so panel corners stay intact; hidden below 40 columns).
+- Settings are written atomically (tmp + rename). `TERMUSIC_CONFIG_DIR` overrides the config dir, tokens included. Tests never read or write the real config dir.
+- Not verified live against a real mpv: the polling round trip.

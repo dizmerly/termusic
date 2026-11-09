@@ -18,6 +18,7 @@ pub struct Player {
     /// Seconds into the current track.
     pub position: f64,
     pub duration: Option<f64>,
+    vol_synced: bool,
     running: Option<Running>,
 }
 
@@ -92,6 +93,7 @@ impl Player {
             volume: volume.min(100),
             position: 0.0,
             duration: None,
+            vol_synced: false,
             running: None,
         }
     }
@@ -118,6 +120,7 @@ impl Player {
                 });
                 self.position = 0.0;
                 self.duration = None;
+                self.vol_synced = false;
                 self.now_playing = Some(title.to_owned());
                 self.playing = true;
                 Ok(())
@@ -186,11 +189,17 @@ impl Player {
         if r.mpv.try_wait().ok().flatten().is_none() {
             if r.polled.elapsed() >= Duration::from_secs(1) {
                 r.polled = Instant::now();
-                if let Some(p) = get_property("time-pos") {
+                let (pos, dur) = poll();
+                if let Some(p) = pos {
                     self.position = p;
                 }
-                if let Some(d) = get_property("duration") {
-                    self.duration = Some(d);
+                if dur.is_some() {
+                    self.duration = dur;
+                }
+                // First answer means the socket exists: re-send a volume set before it did.
+                if (pos.is_some() || dur.is_some()) && !self.vol_synced {
+                    self.vol_synced = true;
+                    let _ = self.ipc(&volume_json(self.volume));
                 }
             }
             return None;
@@ -201,24 +210,39 @@ impl Player {
     }
 }
 
-/// Read one numeric mpv property; short timeouts so the UI thread never stalls.
-fn get_property(name: &str) -> Option<f64> {
-    let t = Duration::from_millis(50);
-    let mut s = UnixStream::connect(app_sock()).ok()?;
-    s.set_read_timeout(Some(t)).ok()?;
-    s.set_write_timeout(Some(t)).ok()?;
-    writeln!(
-        s,
-        r#"{{"command":["get_property","{name}"],"request_id":7}}"#
-    )
-    .ok()?;
-    // mpv interleaves async events with replies: skip lines until ours.
-    BufReader::new(s)
-        .lines()
-        .take(8)
-        .map_while(Result::ok)
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
-        .find(|v| v["request_id"] == 7)
+/// Query `time-pos` and `duration` in one round trip; short timeouts so the UI never stalls.
+fn poll() -> (Option<f64>, Option<f64>) {
+    let t = Duration::from_millis(30);
+    let Ok(mut s) = UnixStream::connect(app_sock()) else {
+        return (None, None);
+    };
+    let _ = s.set_read_timeout(Some(t));
+    let _ = s.set_write_timeout(Some(t));
+    let req = r#"{"command":["get_property","time-pos"],"request_id":1}
+{"command":["get_property","duration"],"request_id":2}
+"#;
+    if s.write_all(req.as_bytes()).is_err() {
+        return (None, None);
+    }
+    let mut lines = Vec::new();
+    for l in BufReader::new(s).lines().take(8) {
+        let Ok(l) = l else { break };
+        let done = l.contains("\"request_id\":2");
+        lines.push(l);
+        if done {
+            break;
+        }
+    }
+    (parse_reply(&lines, 1), parse_reply(&lines, 2))
+}
+
+/// The numeric `data` of the reply with `request_id == id`; events and errors give `None`.
+fn parse_reply<S: AsRef<str>>(lines: &[S], id: u64) -> Option<f64> {
+    lines
+        .iter()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.as_ref()).ok())
+        .find(|v| v["request_id"] == id)
+        .filter(|v| v["error"] == "success")
         .and_then(|v| v["data"].as_f64())
 }
 
@@ -341,6 +365,19 @@ mod tests {
         assert_eq!(volume_json(80), r#"["set_property","volume",80]"#);
         assert_eq!(seek_json(5), r#"["seek",5,"relative"]"#);
         assert_eq!(seek_json(-5), r#"["seek",-5,"relative"]"#);
+    }
+
+    #[test]
+    fn reply_parsing() {
+        let lines = [
+            r#"{"event":"playback-restart"}"#,
+            r#"{"data":12.5,"request_id":1,"error":"success"}"#,
+            r#"{"error":"property unavailable","request_id":2}"#,
+        ];
+        assert_eq!(parse_reply(&lines, 1), Some(12.5));
+        assert_eq!(parse_reply(&lines, 2), None);
+        assert_eq!(parse_reply(&lines, 3), None);
+        assert_eq!(parse_reply(&["garbage"], 1), None);
     }
 
     #[test]
