@@ -203,7 +203,6 @@ impl App {
         }
     }
 
-    /// Queue the highlighted result without starting playback.
     /// Player command failures go to the status bar.
     fn show_err(&mut self, r: anyhow::Result<()>) {
         if let Err(e) = r {
@@ -211,6 +210,7 @@ impl App {
         }
     }
 
+    /// Queue the highlighted result without starting playback.
     fn queue_selected(&mut self) {
         if let Some(t) = self.results.get(self.selected).cloned() {
             self.status = format!("queued: {}", t.title);

@@ -107,7 +107,10 @@ impl Queue {
             let last = all.last().map(|t| t.id.clone());
             self.set_upcoming(all);
             // The re-shuffle must not replay the track that just finished.
-            if self.upcoming.len() > 1 && self.upcoming.front().map(|t| &t.id) == last.as_ref() {
+            if self.shuffle
+                && self.upcoming.len() > 1
+                && self.upcoming.front().map(|t| &t.id) == last.as_ref()
+            {
                 let j = 1 + self.rand_below(self.upcoming.len() - 1);
                 self.upcoming.swap(0, j);
             }
