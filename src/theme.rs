@@ -11,6 +11,19 @@ pub const LOGO: [&str; 3] = [
     " ╩ ╚═╝╩╚═╩ ╩╚═╝╚═╝╩╚═╝",
 ];
 
+/// Cassette art. To replace it: keep every line the same width, and mark each
+/// reel hub with `@` (swapped for a spinning glyph each frame).
+pub const CASSETTE: [&str; 6] = [
+    "╭────────────────────╮",
+    "│ ╭────────────────╮ │",
+    "│ │  (@)      (@)  │ │",
+    "│ ╰────────────────╯ │",
+    "│     ╭────────╮     │",
+    "╰─────┴────────┴─────╯",
+];
+/// Frames for a spinning reel hub.
+pub const REEL_FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
+
 pub const ICON_NOTE: &str = "♪";
 pub const ICON_PLAY: &str = "▶";
 pub const ICON_PAUSE: &str = "⏸";
@@ -56,6 +69,12 @@ pub fn panel(title: &str, color: Color) -> Block<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cassette_lines_are_equal_width() {
+        let w = CASSETTE[0].chars().count();
+        assert!(CASSETTE.iter().all(|l| l.chars().count() == w));
+    }
 
     #[test]
     fn logo_lines_are_equal_width() {

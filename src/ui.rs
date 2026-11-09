@@ -84,22 +84,40 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             };
             msg(f, lines, "Login", theme::GREEN)
         }
-        Screen::Search => f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("{} ", theme::ICON_NOTE), fg(theme::PINK)),
-                Span::styled(app.input.clone(), fg(theme::YELLOW)),
-                Span::styled("▏", fg(theme::PINK)),
-            ]))
-            .block(theme::panel(
-                if app.results.is_empty() {
-                    "Search · Enter run · Esc: quit"
-                } else {
-                    "Search · Enter run · Esc/Tab: back to results"
-                },
-                theme::CYAN,
-            )),
-            body,
-        ),
+        Screen::Search => {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("{} ", theme::ICON_NOTE), fg(theme::PINK)),
+                    Span::styled(app.input.clone(), fg(theme::YELLOW)),
+                    Span::styled("▏", fg(theme::PINK)),
+                ]))
+                .block(theme::panel(
+                    if app.results.is_empty() {
+                        "Search · Enter run · Esc: quit"
+                    } else {
+                        "Search · Enter run · Esc/Tab: back to results"
+                    },
+                    theme::CYAN,
+                )),
+                body,
+            );
+            // Below the input row, inside the panel border.
+            let art = Rect::new(
+                body.x + 1,
+                body.y + 2,
+                body.width.saturating_sub(2),
+                body.height.saturating_sub(3),
+            );
+            let spin = if app.player.playing {
+                app.player.position as usize
+            } else {
+                0
+            };
+            let lines = cassette_lines(spin);
+            if art.height >= lines.len() as u16 && art.width >= lines[0].width() as u16 {
+                f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), art);
+            }
+        }
         Screen::Help => draw_help(f, app, body),
         Screen::Settings => draw_settings(f, app, body),
         Screen::History => {
@@ -128,6 +146,24 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     draw_bar(f, app, bar);
     draw_volume(f, app.player.volume, f.area());
+}
+
+/// Cassette art with spinning reels; `spin` picks the frame (0 when idle).
+fn cassette_lines(spin: usize) -> Vec<Line<'static>> {
+    let reel = theme::REEL_FRAMES[spin % theme::REEL_FRAMES.len()].to_string();
+    theme::CASSETTE
+        .iter()
+        .map(|l| {
+            let mut spans = Vec::new();
+            for (i, part) in l.split('@').enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(reel.clone(), fg(theme::YELLOW).bold()));
+                }
+                spans.push(Span::styled(part.to_owned(), fg(theme::PINK)));
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// `filled`/`░` bar of `width` cells for a 0..=1 fraction.
@@ -446,6 +482,24 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    #[test]
+    fn cassette_shows_when_roomy_hides_when_small_and_spins() {
+        let text = |l: &[Line]| l.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let (a, b) = (text(&cassette_lines(0)), text(&cassette_lines(1)));
+        assert_ne!(a, b);
+        assert_eq!(a, text(&cassette_lines(theme::REEL_FRAMES.len())));
+        assert!(a.iter().all(|l| !l.contains('@')));
+        let w = a[0].chars().count();
+        assert!(a.iter().all(|l| l.chars().count() == w));
+
+        let mut app = App::blank();
+        app.screen = Screen::Search;
+        assert!(render(&mut app, 80, 30).contains('◐'));
+        for (w, h) in [(80, 8), (20, 30), (1, 1), (80, 3)] {
+            assert!(!render(&mut app, w, h).contains('◐'), "{w}x{h}");
+        }
     }
 
     #[test]
