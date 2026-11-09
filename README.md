@@ -15,7 +15,7 @@ brew install mpv yt-dlp        # macOS; use your package manager elsewhere
 In the [Google Cloud console](https://console.cloud.google.com/apis/credentials):
 1. Enable the **YouTube Data API v3** for your project.
 2. Create credentials → **OAuth client ID** → application type **Desktop app**, and add yourself as a test user on the consent screen.
-3. Either download the JSON and save it as `client_secret.json` in termusic's config dir (`~/Library/Application Support/termusic/` on macOS, `~/.config/termusic/` on Linux), or export `TERMUSIC_CLIENT_ID` and `TERMUSIC_CLIENT_SECRET`.
+3. Either download the JSON and save it as `client_secret.json` in termusic's config dir (`~/Library/Application Support/termusic/` on macOS, `~/.config/termusic/` on Linux), or export `TERMUSIC_CLIENT_ID` and `TERMUSIC_CLIENT_SECRET`. The secret is optional (sign-in uses PKCE), but Google's Desktop-app clients currently still require it, so include it if your client has one.
 
 **3. Run**
 
@@ -68,7 +68,7 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 
 ### Networking and auth
 - All network calls run in background tasks, so the UI never freezes. Connectivity is checked before each one.
-- Sign-in uses Google's loopback-redirect flow (Desktop-app client). Tokens are stored in your config dir (`termusic/tokens.json`, mode `0600`) and refreshed automatically. If Google revokes the session you're logged out.
+- Sign-in uses Google's loopback-redirect flow (Desktop-app client) with PKCE (S256); the client secret is sent only when configured. Tokens are stored in your config dir (`termusic/tokens.json`, mode `0600`) and refreshed automatically. If Google revokes the session you're logged out.
 - Read-only access: the app requests only the `youtube.readonly` scope.
 
 ### CLI
@@ -93,4 +93,4 @@ Layout: `app.rs` (all state), `ui.rs` / `theme.rs` (rendering, colors), `auth.rs
 ## Limitations
 - Unix only (macOS/Linux): the player uses a Unix socket.
 - Shuffle uses a small clock-seeded xorshift, not a cryptographic RNG.
-- Google sign-in has no PKCE and hasn't been exercised live yet; playlists show only the first 50 tracks.
+- Google sign-in hasn't been exercised live yet; playlists show only the first 50 tracks.

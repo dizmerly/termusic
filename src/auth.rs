@@ -1,5 +1,6 @@
 //! Google OAuth 2.0 (loopback redirect); tokens persisted in the user config dir.
 use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64URL};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{path::PathBuf, time::Duration};
@@ -64,6 +65,7 @@ fn creds_from_json(v: &Value) -> Result<(String, Option<String>)> {
     ))
 }
 
+/// `N` bytes from the OS CSRNG; feeds both the `state` and the PKCE verifier.
 fn random_bytes<const N: usize>() -> Result<[u8; N]> {
     let mut b = [0u8; N];
     std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom")?, &mut b)?; // unix-only, like the player
@@ -72,17 +74,16 @@ fn random_bytes<const N: usize>() -> Result<[u8; N]> {
 
 /// PKCE code_verifier: 32 random bytes as base64url-no-pad (43 chars, RFC 7636 §4.1).
 fn pkce_verifier() -> Result<String> {
-    use base64::Engine;
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes::<32>()?))
+    Ok(B64URL.encode(random_bytes::<32>()?))
 }
 
 /// PKCE S256 (RFC 7636): base64url-no-pad of the verifier's SHA-256.
 fn code_challenge(verifier: &str) -> String {
-    use base64::Engine;
     use sha2::Digest;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier))
+    B64URL.encode(sha2::Sha256::digest(verifier))
 }
 
+/// Google consent page for the loopback flow, carrying the CSRF `state` and PKCE challenge.
 fn auth_url(id: &str, redirect: &str, state: &str, challenge: &str) -> Result<reqwest::Url> {
     Ok(reqwest::Url::parse_with_params(
         "https://accounts.google.com/o/oauth2/v2/auth",
@@ -145,7 +146,7 @@ fn parse(r: &Value, old_refresh: &str) -> Option<Tokens> {
 }
 
 async fn post(form: &[(&str, &str)]) -> Result<Value> {
-    // No error_for_status: Google answers "pending" polls with HTTP 400 + JSON.
+    // No error_for_status: Google reports failures (e.g. invalid_grant) as HTTP 400 + JSON.
     Ok(reqwest::Client::new()
         .post(TOKEN_URL)
         .form(form)
