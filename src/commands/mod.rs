@@ -1,5 +1,6 @@
 //! Command registry. Each submodule declares `ENABLED`, `REQUIRES_LOGIN`, `NAME`, `KEY`, `DESCRIPTION`.
 pub mod help;
+pub mod history;
 pub mod loop_track;
 pub mod pause;
 pub mod play;
@@ -10,6 +11,7 @@ pub mod quit;
 pub mod search;
 pub mod seek_back;
 pub mod seek_forward;
+pub mod settings;
 pub mod shuffle;
 pub mod skip;
 pub mod volume_down;
@@ -29,7 +31,7 @@ macro_rules! entry {
     };
 }
 
-fn all() -> [(bool, Command); 15] {
+fn all() -> [(bool, Command); 17] {
     entry!(
         play,
         playlists,
@@ -44,6 +46,8 @@ fn all() -> [(bool, Command); 15] {
         seek_back,
         seek_forward,
         search,
+        history,
+        settings,
         help,
         quit
     )
@@ -82,8 +86,9 @@ mod tests {
     fn every_enabled_command_is_listed_once() {
         let keys: Vec<_> = super::enabled().iter().map(|c| c.key).collect();
         assert!(keys.contains(&'p') && !super::disabled('p'));
-        assert_eq!(keys.len(), 15);
+        assert_eq!(keys.len(), 17);
         assert!(super::requires_login('P') && !super::requires_login('p'));
+        assert!(keys.contains(&'S') && keys.contains(&'H'));
         assert!(keys.contains(&'l') && keys.contains(&',') && keys.contains(&'.'));
     }
 }

@@ -6,7 +6,7 @@ use serde_json::Value;
 const API: &str = "https://www.googleapis.com/youtube/v3/";
 
 /// A video, or (for `playlists()`) a playlist whose `id` is the playlist id.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Track {
     pub title: String,
     pub channel: String,

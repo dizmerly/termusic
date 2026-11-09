@@ -3,6 +3,7 @@ use crate::cmd::{self, Cmd, Event};
 use crate::commands;
 use crate::player::Player;
 use crate::queue::{Loop, Queue};
+use crate::settings::Settings;
 use crate::youtube::{self, Track};
 use crate::{auth, net};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -33,8 +34,20 @@ pub enum Screen {
     Results,
     Playlists,
     Help,
+    Settings,
+    History,
     Offline,
 }
+
+impl Screen {
+    /// Screens opened on top of another one; Esc returns to `App::prev`.
+    fn is_overlay(self) -> bool {
+        matches!(self, Self::Help | Self::Settings | Self::History)
+    }
+}
+
+/// Rows on the settings screen: volume, history file, clear history.
+const SETTING_ROWS: usize = 3;
 
 pub struct App {
     pub screen: Screen,
@@ -65,6 +78,15 @@ pub struct App {
     pub queue: Queue,
     pub status: String,
     pub quit: bool,
+    pub settings: Settings,
+    /// Last played tracks, most recent first.
+    pub history: Vec<Track>,
+    /// Highlighted row on the settings screen.
+    pub setting_row: usize,
+    /// First visible line of the help screen.
+    pub help_scroll: u16,
+    /// List selection and offset to restore when an overlay closes.
+    saved_sel: (usize, usize),
 }
 
 impl App {
@@ -76,7 +98,17 @@ impl App {
             Screen::Offline
         };
         let (tx, rx) = unbounded_channel();
+        let settings = Settings::load();
         Self {
+            history: settings
+                .history_file()
+                .map(|p| crate::history::load(&p))
+                .unwrap_or_default(),
+            player: Player::new(settings.volume),
+            settings,
+            setting_row: 0,
+            help_scroll: 0,
+            saved_sel: (0, 0),
             playlists: Vec::new(),
             from_playlist: false,
             login_prompted: false,
@@ -93,7 +125,6 @@ impl App {
             selected: 0,
             offset: 0,
             page: 10,
-            player: Player::new(crate::settings::Settings::load().volume),
             queue: Queue::new(),
             status: crate::player::missing_deps().unwrap_or_default(),
             quit: false,
@@ -230,7 +261,14 @@ impl App {
     pub fn on_event(&mut self, e: Event) {
         match e {
             Event::TrackStarted(id) => {
-                if self.screen != Screen::Playlists
+                if let Some(t) = self.queue.current().filter(|t| t.id == id).cloned() {
+                    crate::history::push(&mut self.history, t);
+                    self.save_history();
+                    if self.screen == Screen::History {
+                        self.select(0); // the playing track just moved to the top
+                    }
+                }
+                if !matches!(self.screen, Screen::Playlists | Screen::History)
                     && let Some(i) = self.results.iter().position(|r| r.id == id)
                 {
                     self.select(i);
@@ -265,10 +303,8 @@ impl App {
             Cmd::Seek(s) => self.player.seek(s),
             Cmd::Volume(d) => {
                 let r = self.player.change_volume(d);
-                crate::settings::Settings {
-                    volume: self.player.volume,
-                }
-                .save();
+                self.settings.volume = self.player.volume;
+                self.settings.save();
                 r
             }
             Cmd::ToggleShuffle => {
@@ -354,10 +390,14 @@ impl App {
                 KeyCode::Backspace => {
                     self.input.pop();
                 }
-                KeyCode::Esc if !self.results.is_empty() => self.screen = Screen::Results,
+                KeyCode::Esc | KeyCode::Tab if !self.results.is_empty() => {
+                    self.screen = Screen::Results
+                }
                 KeyCode::Esc => self.quit = true,
                 KeyCode::F(1) => self.open_help(),
                 KeyCode::F(2) => self.open_playlists(),
+                KeyCode::F(3) => self.open(Screen::Settings),
+                KeyCode::F(4) => self.open(Screen::History),
                 _ => {}
             },
             Screen::Login => match key.code {
@@ -369,16 +409,86 @@ impl App {
             },
             Screen::Help => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('?' | 'q')) {
-                    self.screen = self.prev;
+                    self.close_overlay();
+                }
+                match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.help_scroll = self.help_scroll.saturating_add(1)
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.help_scroll = self.help_scroll.saturating_sub(1)
+                    }
+                    KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(10),
+                    KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
+                    KeyCode::Char('g') | KeyCode::Home => self.help_scroll = 0,
+                    _ => {}
                 }
             }
-            Screen::Results | Screen::Playlists => self.handle_list_key(key),
+            Screen::Settings => self.handle_settings_key(key),
+            Screen::Results | Screen::Playlists | Screen::History => self.handle_list_key(key),
+        }
+    }
+
+    fn save_history(&self) {
+        if let Some(p) = self.settings.history_file() {
+            crate::history::save(&p, &self.history);
+        }
+    }
+
+    /// Open Help, Settings or History over the current screen (Esc comes back).
+    fn open(&mut self, s: Screen) {
+        if self.screen == s {
+            return;
+        }
+        if !self.screen.is_overlay() {
+            self.prev = self.screen;
+            self.saved_sel = (self.selected, self.offset);
+        }
+        self.screen = s;
+        match s {
+            Screen::Help => self.help_scroll = 0,
+            Screen::Settings => self.setting_row = 0,
+            Screen::History => {
+                self.offset = 0;
+                self.select(0);
+            }
+            _ => {}
         }
     }
 
     fn open_help(&mut self) {
-        self.prev = self.screen;
-        self.screen = Screen::Help;
+        self.open(Screen::Help);
+    }
+
+    /// Leave an overlay for the screen it was opened from, restoring that list's selection.
+    fn close_overlay(&mut self) {
+        self.screen = self.prev;
+        self.offset = self.saved_sel.1;
+        self.select(self.saved_sel.0);
+    }
+
+    fn handle_settings_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::F(3) | KeyCode::Char(commands::settings::KEY) => {
+                self.close_overlay()
+            }
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.open_help(),
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.setting_row = (self.setting_row + 1).min(SETTING_ROWS - 1)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.setting_row = self.setting_row.saturating_sub(1)
+            }
+            KeyCode::Left | KeyCode::Char('-') => self.dispatch(Cmd::Volume(-cmd::STEP)),
+            KeyCode::Right | KeyCode::Char('+') => self.dispatch(Cmd::Volume(cmd::STEP)),
+            KeyCode::Enter if self.setting_row == 2 => {
+                self.history.clear();
+                self.save_history();
+                self.status = "history cleared".into();
+            }
+            _ => {}
+        }
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) {
@@ -413,6 +523,11 @@ impl App {
                     });
                 }
             }
+            KeyCode::Enter if self.screen == Screen::History => {
+                // Replay from here; the queue follows history order.
+                self.queue.set(self.history.clone(), self.selected);
+                self.play_current();
+            }
             KeyCode::Enter => {
                 self.play_selected();
                 if !self.from_playlist
@@ -426,6 +541,13 @@ impl App {
             }
             KeyCode::Char('a') if self.screen == Screen::Results => self.queue_selected(),
             KeyCode::Char('P') | KeyCode::F(2) => self.open_playlists(),
+            KeyCode::Esc | KeyCode::Char(commands::history::KEY) | KeyCode::F(4)
+                if self.screen == Screen::History =>
+            {
+                self.close_overlay()
+            }
+            KeyCode::Char(commands::settings::KEY) | KeyCode::F(3) => self.open(Screen::Settings),
+            KeyCode::Char(commands::history::KEY) | KeyCode::F(4) => self.open(Screen::History),
             KeyCode::Char('/') | KeyCode::Esc => self.screen = Screen::Search,
             KeyCode::Char('?') => self.open_help(),
             KeyCode::Char('q') => self.quit = true,
@@ -435,10 +557,10 @@ impl App {
 
     /// Length of the list shown on the current screen.
     pub fn len(&self) -> usize {
-        if self.screen == Screen::Playlists {
-            self.playlists.len()
-        } else {
-            self.results.len()
+        match self.screen {
+            Screen::Playlists => self.playlists.len(),
+            Screen::History => self.history.len(),
+            _ => self.results.len(),
         }
     }
 
@@ -722,5 +844,144 @@ mod tests {
         a.busy = true;
         press(&mut a, KeyCode::Enter);
         assert!(a.queue.current().is_none());
+    }
+
+    #[test]
+    fn search_tab_and_esc_return_to_results_or_quit() {
+        let mut a = app();
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.screen, Screen::Search);
+        press(&mut a, KeyCode::Tab);
+        assert_eq!(a.screen, Screen::Results);
+        press(&mut a, KeyCode::Char('/'));
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.screen, Screen::Results);
+        a.screen = Screen::Search;
+        a.results.clear();
+        press(&mut a, KeyCode::Tab);
+        assert_eq!((a.screen, a.quit), (Screen::Search, false));
+        press(&mut a, KeyCode::Esc);
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn overlays_return_to_prior_screen_and_selection() {
+        let mut a = app();
+        a.select(7);
+        for (key, screen) in [
+            (KeyCode::Char('S'), Screen::Settings),
+            (KeyCode::F(3), Screen::Settings),
+            (KeyCode::Char('H'), Screen::History),
+            (KeyCode::F(4), Screen::History),
+            (KeyCode::Char('?'), Screen::Help),
+        ] {
+            press(&mut a, key);
+            assert_eq!(a.screen, screen);
+            press(&mut a, KeyCode::Esc);
+            assert_eq!((a.screen, a.selected), (Screen::Results, 7), "{key:?}");
+        }
+        // Toggle keys close their own screen; Help opened from Settings still returns to the list.
+        press(&mut a, KeyCode::Char('H'));
+        press(&mut a, KeyCode::Char('H'));
+        assert_eq!(a.screen, Screen::Results);
+        press(&mut a, KeyCode::Char('S'));
+        press(&mut a, KeyCode::Char('?'));
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.screen, Screen::Results);
+        // From Search the F-keys open them and Esc goes back to Search.
+        a.screen = Screen::Search;
+        press(&mut a, KeyCode::F(4));
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.screen, Screen::Search);
+    }
+
+    #[test]
+    fn help_scrolls_and_resets() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('?'));
+        press(&mut a, KeyCode::Char('j'));
+        press(&mut a, KeyCode::PageDown);
+        assert_eq!(a.help_scroll, 11);
+        press(&mut a, KeyCode::Char('k'));
+        press(&mut a, KeyCode::PageUp);
+        assert_eq!(a.help_scroll, 0);
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Char('g'));
+        assert_eq!(a.help_scroll, 0);
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Esc);
+        press(&mut a, KeyCode::Char('?'));
+        assert_eq!(a.help_scroll, 0);
+    }
+
+    fn track(id: &str) -> Track {
+        Track {
+            title: id.into(),
+            channel: "c".into(),
+            id: id.into(),
+        }
+    }
+
+    #[test]
+    fn track_started_records_history_most_recent_first() {
+        let mut a = app();
+        a.history.clear();
+        for i in ["1", "2", "1"] {
+            a.queue.set(a.results.clone(), i.parse().unwrap());
+            a.on_event(Event::TrackStarted(i.into()));
+        }
+        let ids: Vec<_> = a.history.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["1", "2"]);
+        a.on_event(Event::TrackStarted("not-current".into())); // not the queue's track: ignored
+        assert_eq!(a.history.len(), 2);
+    }
+
+    #[test]
+    fn history_screen_lists_and_enter_queues_from_selection() {
+        let mut a = app();
+        a.history = ["h0", "h1", "h2"].map(track).into();
+        press(&mut a, KeyCode::Char('H'));
+        assert_eq!((a.len(), a.selected), (3, 0));
+        press(&mut a, KeyCode::Char('j'));
+        press(&mut a, KeyCode::Enter);
+        // Playing h1 moves it to the top; the queue keeps the old order after it.
+        assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("h1"));
+        assert_eq!(a.queue.upcoming().next().map(|t| t.id.as_str()), Some("h2"));
+        assert_eq!(a.history[0].id, "h1");
+        assert_eq!((a.screen, a.selected), (Screen::History, 0));
+        a.player.stop();
+    }
+
+    #[test]
+    fn settings_volume_and_clear_history() {
+        let mut a = app();
+        a.history = vec![track("x")];
+        a.player.volume = 50;
+        press(&mut a, KeyCode::Char('S'));
+        press(&mut a, KeyCode::Right);
+        press(&mut a, KeyCode::Char('+'));
+        assert_eq!((a.player.volume, a.settings.volume), (60, 60));
+        press(&mut a, KeyCode::Left);
+        press(&mut a, KeyCode::Char('-'));
+        press(&mut a, KeyCode::Char('-'));
+        assert_eq!(a.player.volume, 45);
+        press(&mut a, KeyCode::Enter); // row 0: nothing cleared
+        assert_eq!(a.history.len(), 1);
+        for _ in 0..5 {
+            press(&mut a, KeyCode::Char('j')); // clamps at the last row
+        }
+        assert_eq!(a.setting_row, SETTING_ROWS - 1);
+        press(&mut a, KeyCode::Enter);
+        assert!(a.history.is_empty());
+        press(&mut a, KeyCode::Char('k'));
+        assert_eq!(a.setting_row, 1);
+        press(&mut a, KeyCode::Char('q'));
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn screen_overlay_flags() {
+        assert!(Screen::Help.is_overlay() && Screen::History.is_overlay());
+        assert!(!Screen::Results.is_overlay() && !Screen::Search.is_overlay());
     }
 }

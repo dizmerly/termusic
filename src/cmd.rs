@@ -4,7 +4,7 @@ use crate::commands;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Volume and seek step per key press.
-const STEP: i32 = 5;
+pub const STEP: i32 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cmd {

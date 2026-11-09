@@ -3,6 +3,7 @@ mod auth;
 mod cmd;
 mod commands;
 mod config;
+mod history;
 mod net;
 mod player;
 mod queue;
@@ -73,9 +74,7 @@ fn run_tui() -> Result<()> {
         Ok(())
     })();
     ratatui::restore();
-    settings::Settings {
-        volume: app.player.volume,
-    }
-    .save();
+    app.settings.volume = app.player.volume;
+    app.settings.save();
     res
 }

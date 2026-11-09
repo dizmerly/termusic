@@ -91,14 +91,28 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 Span::styled("▏", fg(theme::PINK)),
             ]))
             .block(theme::panel(
-                "Search · Enter to run · Esc to quit",
+                if app.results.is_empty() {
+                    "Search · Enter run · Esc: quit"
+                } else {
+                    "Search · Enter run · Esc/Tab: back to results"
+                },
                 theme::CYAN,
             )),
             body,
         ),
-        Screen::Help => draw_help(f, body),
+        Screen::Help => draw_help(f, app, body),
+        Screen::Settings => draw_settings(f, app, body),
+        Screen::History => {
+            let rows = std::mem::take(&mut app.history);
+            let title = "History · Enter replays from here · Esc back";
+            draw_list(f, app, &rows, title, theme::YELLOW, body);
+            app.history = rows;
+        }
         Screen::Results => {
-            let title = format!("Results ({})", app.results.len());
+            let title = format!(
+                "Results ({}) · / or Esc: search · ? help",
+                app.results.len()
+            );
             let rows = std::mem::take(&mut app.results);
             draw_list(f, app, &rows, &title, theme::PURPLE, body);
             app.results = rows;
@@ -190,7 +204,12 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(format!("  {}", app.status), fg(theme::ORANGE)));
     }
     // Right side: progress (only with a known length and room) then the help hint.
-    let mut right = vec![Span::styled("? help ", fg(theme::PINK))];
+    let hint = if area.width >= 70 && app.status.is_empty() {
+        "S settings · H history · ? help "
+    } else {
+        "? help "
+    };
+    let mut right = vec![Span::styled(hint, fg(theme::PINK))];
     if let (Some(d), true) = (app.player.duration, area.width >= 60) {
         let time = format!("{} / {}  ", mmss(app.player.position), mmss(d));
         right.insert(
@@ -273,31 +292,137 @@ fn fit(s: &str, n: usize) -> String {
     s.chars().take(n.saturating_sub(1)).chain(['…']).collect()
 }
 
-fn draw_help(f: &mut Frame, area: Rect) {
-    let head = |s| Line::styled(s, fg(theme::YELLOW).bold());
+/// Help sections: commands are grouped by name; any enabled command not named here lands in "Other".
+const GROUPS: [(&str, &[&str]); 4] = [
+    (
+        "Playback",
+        &[
+            "play",
+            "pause",
+            "skip",
+            "prev",
+            "seek_back",
+            "seek_forward",
+            "volume_up",
+            "volume_down",
+            "shuffle",
+            "loop",
+        ],
+    ),
+    ("Queue", &["queue"]),
+    ("Navigation", &["search", "playlists"]),
+    ("Screens", &["history", "settings", "help", "quit"]),
+];
+
+/// Navigation and screen keys that are not commands.
+const NAV_KEYS: [(&str, &str); 10] = [
+    ("j/k ↓/↑", "move down / up in a list (scroll in Help)"),
+    ("PgDn/Up", "move one page in a list"),
+    ("g / G", "jump to the first / last row"),
+    ("Enter", "run the search, or play the highlighted row"),
+    (
+        "Esc",
+        "go back: Search to results, overlays to prior screen",
+    ),
+    ("Tab", "on Search: back to the results list"),
+    ("F1", "help (same as ?)"),
+    ("F2", "playlists, also while typing a search"),
+    ("F3", "settings (same as S), also while typing a search"),
+    ("F4", "history (same as H), also while typing a search"),
+];
+
+fn help_lines() -> Vec<Line<'static>> {
+    let head = |s: &str| Line::styled(s.to_owned(), fg(theme::YELLOW).bold());
     let key = |k: String, d: String| {
         Line::from(vec![
             Span::styled(format!("{k:>8}  "), theme::title()),
             Span::styled(d, fg(theme::CYAN)),
         ])
     };
-    let mut lines = vec![head("Commands")];
-    for c in commands::enabled() {
-        lines.push(key(
+    let cmds = commands::enabled();
+    let mut lines = vec![Line::styled(
+        "Esc, ? or q closes this screen; j/k PgUp/PgDn scroll.",
+        theme::dim(),
+    )];
+    let line = |c: &commands::Command| {
+        key(
             commands::key_label(c.key),
             format!("{}: {}", c.name, c.description),
-        ));
+        )
+    };
+    for (title, names) in GROUPS {
+        let rows: Vec<_> = cmds.iter().filter(|c| names.contains(&c.name)).collect();
+        if !rows.is_empty() {
+            lines.push(head(title));
+            lines.extend(rows.into_iter().map(line));
+        }
     }
-    // No blank line before Navigation: every row is needed to fit 80x24.
-    lines.extend([
-        head("Navigation (lists)"),
-        key("j/k ↓/↑".into(), "move down / up".into()),
-        key("PgDn/Up".into(), "move one page".into()),
-        key("g / G".into(), "jump to first / last".into()),
-        Line::styled("Esc, ? or q closes this screen.", theme::dim()),
-    ]);
+    let known = |c: &&commands::Command| GROUPS.iter().any(|(_, n)| n.contains(&c.name));
+    let other: Vec<_> = cmds.iter().filter(|c| !known(c)).collect();
+    if !other.is_empty() {
+        lines.push(head("Other"));
+        lines.extend(other.into_iter().map(line));
+    }
+    lines.push(head("Keys"));
+    lines.extend(NAV_KEYS.map(|(k, d)| key(k.into(), d.into())));
+    lines
+}
+
+fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
+    let lines = help_lines();
+    let rows = area.height.saturating_sub(2) as usize;
+    let max = lines.len().saturating_sub(rows) as u16;
+    app.help_scroll = app.help_scroll.min(max);
+    let title = if max > 0 {
+        "Help · scroll with j/k"
+    } else {
+        "Help"
+    };
     f.render_widget(
-        Paragraph::new(lines).block(theme::panel("Help", theme::PINK)),
+        Paragraph::new(lines)
+            .scroll((app.help_scroll, 0))
+            .block(theme::panel(title, theme::PINK)),
+        area,
+    );
+}
+
+fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
+    let path = app
+        .settings
+        .history_file()
+        .map_or_else(|| "(none)".into(), |p| p.display().to_string());
+    let row = |i: usize, label: &str, value: String| {
+        let sel = app.setting_row == i;
+        let line = Line::from(vec![
+            Span::styled(if sel { " ▶ " } else { "   " }, fg(theme::PINK)),
+            Span::styled(format!("{label:<14}"), fg(theme::YELLOW)),
+            Span::styled(value, fg(theme::CYAN)),
+        ]);
+        if sel {
+            line.style(theme::selected())
+        } else {
+            line
+        }
+    };
+    let lines = vec![
+        row(
+            0,
+            "Volume",
+            format!("{}%  (←/→ or -/+ changes it by 5)", app.player.volume),
+        ),
+        row(1, "History file", path),
+        Line::styled(
+            "                change: env TERMUSIC_HISTORY or `history_path` in settings.json",
+            theme::dim(),
+        ),
+        row(
+            2,
+            "Clear history",
+            format!("Enter ({} tracks)", app.history.len()),
+        ),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).block(theme::panel("Settings · j/k move · Esc back", theme::GREEN)),
         area,
     );
 }
@@ -324,9 +449,71 @@ mod tests {
         a.screen = Screen::Help;
         let s = render(&mut a, 80, 24);
         assert!(s.contains("closes this screen"), "help clipped");
-        assert!(s.contains("Open the search prompt"));
-        assert!(s.contains("Your playlists (F2 on Search)"));
-        assert!(s.contains("Back to the previous track"));
+        assert!(s.contains("Playback"));
+    }
+
+    #[test]
+    fn help_lists_every_command_and_key_when_scrolled() {
+        let mut a = App::new();
+        a.screen = Screen::Help;
+        let mut all = String::new();
+        for scroll in [0, 8, 16, 24, 32] {
+            a.help_scroll = scroll;
+            all += &render(&mut a, 80, 24);
+        }
+        for c in commands::enabled() {
+            assert!(all.contains(&format!("{}: ", c.name)), "{}", c.name);
+            assert!(all.contains(c.description), "{}", c.name);
+        }
+        for g in ["Playback", "Queue", "Navigation", "Screens"] {
+            assert!(all.contains(g), "{g}");
+        }
+        for k in [
+            "Esc", "Tab", "F1", "F2", "F3", "F4", "PgDn/Up", "g / G", "Enter",
+        ] {
+            assert!(all.contains(k), "{k}");
+        }
+        assert!(a.help_scroll < 32, "scroll is clamped");
+    }
+
+    #[test]
+    fn search_and_results_hints() {
+        let mut a = App::new();
+        a.screen = Screen::Search;
+        assert!(render(&mut a, 80, 24).contains("Esc: quit"));
+        a.results = vec![Track {
+            title: "t".into(),
+            channel: String::new(),
+            id: "i".into(),
+        }];
+        assert!(render(&mut a, 80, 24).contains("Esc/Tab: back to results"));
+        a.screen = Screen::Results;
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains("/ or Esc: search") && s.contains("S settings · H history"));
+    }
+
+    #[test]
+    fn settings_and_history_render() {
+        let mut a = App::new();
+        a.screen = Screen::Settings;
+        let s = render(&mut a, 80, 24);
+        for w in [
+            "Volume",
+            "History file",
+            "TERMUSIC_HISTORY",
+            "Clear history",
+        ] {
+            assert!(s.contains(w), "{w}");
+        }
+        a.screen = Screen::History;
+        assert!(render(&mut a, 80, 24).contains("nothing here yet"));
+        a.history = vec![Track {
+            title: "Old song".into(),
+            channel: "Chan".into(),
+            id: "o".into(),
+        }];
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains("Old song") && s.contains("Chan"));
     }
 
     #[test]
