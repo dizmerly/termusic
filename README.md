@@ -49,6 +49,7 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 | `a` | Add the highlighted result to the queue (plays after the current track, before the mix) |
 | `p` | Pause / resume |
 | `n` | Next track |
+| `b` | Back to the previous track (the current one plays next; stops at the first track) |
 | `s` | Toggle shuffle |
 | `l` | Cycle loop: off / all (↻) / one (↻1) |
 | `+` / `-` | Volume up / down |
@@ -93,7 +94,7 @@ cargo test
 cargo fmt
 ```
 
-Layout: `app.rs` (all state), `ui.rs` / `theme.rs` (rendering, colors), `auth.rs`, `youtube.rs`, `player.rs`, `queue.rs`, `net.rs`, `commands/` (one file per command with an `ENABLED` flag; the help screen lists only enabled ones). Sprint notes live in `SPRINT.md`.
+Layout: `app.rs` (all state), `ui.rs` / `theme.rs` (rendering, colors), `auth.rs`, `youtube.rs`, `player.rs`, `queue.rs`, `net.rs`, `cmd.rs` (playback `Cmd`s that keys map to and player/connection `Event`s that `App::on_event` applies; media keys or a menu-bar helper can reuse them), `commands/` (one file per command with an `ENABLED` flag; the help screen lists only enabled ones). Sprint notes live in `SPRINT.md`.
 
 ## Limitations
 - Unix only (macOS/Linux): the player uses a Unix socket.

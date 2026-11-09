@@ -284,6 +284,7 @@ mod tests {
         assert!(s.contains("closes this screen"), "help clipped");
         assert!(s.contains("Open the search prompt"));
         assert!(s.contains("Your playlists (F2 on Search)"));
+        assert!(s.contains("Back to the previous track"));
     }
 
     #[test]

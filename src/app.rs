@@ -1,5 +1,5 @@
 //! Application state and key handling.
-use crate::cmd::{Cmd, Event};
+use crate::cmd::{self, Cmd, Event};
 use crate::commands;
 use crate::player::Player;
 use crate::queue::{Loop, Queue};
@@ -246,12 +246,14 @@ impl App {
         }
     }
 
-    /// Perform a playback command (from a key today; media keys later).
+    /// Perform a playback command (from a key today; media keys later). Errors go to the status bar.
     pub fn dispatch(&mut self, c: Cmd) {
         let r = match c {
             Cmd::PlayPause => self.player.toggle_pause(),
+            // Advances even on loop-one: the user asked for another track.
             Cmd::Next => {
-                self.skip();
+                self.queue.skip();
+                self.play_current();
                 Ok(())
             }
             Cmd::Prev => {
@@ -271,7 +273,9 @@ impl App {
                 self.player.set_loop_file(self.queue.looping == Loop::One)
             }
         };
-        self.show_err(r);
+        if let Err(e) = r {
+            self.status = e.to_string();
+        }
     }
 
     /// Show a playlist and make it the queue, in order. False (nothing changed) if it is empty.
@@ -306,13 +310,6 @@ impl App {
         }
     }
 
-    /// Player command failures go to the status bar.
-    fn show_err(&mut self, r: anyhow::Result<()>) {
-        if let Err(e) = r {
-            self.status = e.to_string();
-        }
-    }
-
     /// Queue the highlighted result without starting playback.
     fn queue_selected(&mut self) {
         if let Some(t) = self.results.get(self.selected).cloned() {
@@ -324,12 +321,6 @@ impl App {
     /// Track ended: advance the queue (repeats on loop-one).
     fn next(&mut self) {
         self.queue.next();
-        self.play_current();
-    }
-
-    /// User asked for the next track: advance even on loop-one.
-    fn skip(&mut self) {
-        self.queue.skip();
         self.play_current();
     }
 
@@ -389,8 +380,9 @@ impl App {
         {
             return;
         }
-        if let Some(c) = crate::cmd::from_key(key) {
-            return self.dispatch(c);
+        if let Some(c) = cmd::from_key(key) {
+            self.dispatch(c);
+            return;
         }
         let last = self.len().saturating_sub(1);
         match key.code {
