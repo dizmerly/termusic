@@ -283,6 +283,7 @@ mod tests {
         let s = render(&mut a, 80, 24);
         assert!(s.contains("closes this screen"), "help clipped");
         assert!(s.contains("Open the search prompt"));
+        assert!(s.contains("Your playlists (F2 on Search)"));
     }
 
     #[test]

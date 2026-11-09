@@ -136,6 +136,7 @@ impl App {
         }
         if commands::requires_login(commands::playlists::KEY) && !logged_in {
             if self.status == LOGIN_HINT {
+                self.status.clear();
                 self.screen = Screen::Login;
             } else {
                 self.status = LOGIN_HINT.into();
@@ -529,7 +530,7 @@ mod tests {
         a.open_playlists_as(false);
         assert_eq!((a.screen, a.status.as_str()), (Screen::Results, LOGIN_HINT));
         a.open_playlists_as(false); // asking again opens the Login screen
-        assert_eq!(a.screen, Screen::Login);
+        assert_eq!((a.screen, a.status.as_str()), (Screen::Login, ""));
     }
 
     #[test]
@@ -557,5 +558,16 @@ mod tests {
             (a.status.as_str(), a.queue.upcoming().count()),
             ("playlist is empty", 2)
         );
+    }
+
+    #[test]
+    fn f2_on_search_asks_for_login_but_p_is_text() {
+        let mut a = App::new();
+        a.screen = Screen::Search;
+        press(&mut a, KeyCode::Char('P'));
+        assert_eq!((a.input.as_str(), a.screen), ("P", Screen::Search));
+        a.status.clear();
+        a.open_playlists_as(false);
+        assert_eq!(a.status, LOGIN_HINT);
     }
 }
