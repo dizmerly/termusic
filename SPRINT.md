@@ -52,7 +52,7 @@ Plan: `~/.claude/plans/optimized-launching-eagle.md`. Each item: 3 iterations (c
   - Fallback is the Swift helper from the plan (`MPRemoteCommandCenter` + `MPNowPlayingInfoCenter`, Unix socket to termusic). Swift 6.4 and MediaPlayer.framework are installed on this Mac. Decision still open for the user: accept a Swift component?
   - Next step: manual test with real media keys and AirPods using `mpv --no-video` on a YouTube URL; see whether Control Center shows Now Playing.
 - Item 8 (top-right widget), research only: same helper would host an `NSStatusItem` menu bar item (prev/play-pause/next/shuffle/loop/title) driven by `Cmd`/`Event` over the socket; quits when the socket drops. Nothing built; the Swift decision gates it. The `Cmd` enum from item 6 is the contract.
-- Item 9 (cassette look): skipped, waits for the user's art.
+- Item 9 (cassette look): base art in `theme::CASSETTE` (Search screen, reels spin while playing); the user will refine it. See Package D in `docs/SPRINT2-OVERVIEW.md`.
 
 ## Overnight summary
 - Branch `sprint-3-overnight`, 24+ commits ahead of `main`; nothing pushed, `main` untouched. `cargo clippy -- -D warnings` clean, `cargo test` 67 passing at the end.
@@ -70,3 +70,6 @@ Plan: `~/.claude/plans/optimized-launching-eagle.md`. Each item: 3 iterations (c
 
 ## Package C: preload + crossfade (sprint-3 overnight, item 1)
 - Next track's mpv starts paused and silent about 20 s before the end (own socket and watchdog), fades in over the last 4 s while the old one fades out (200 ms IPC steps from `tick`, equal-power, user volume as ceiling), then is promoted without a gap; `n` promotes a ready preload instantly. Stale or failed preloads fall back to the cold spawn. `Player` is `current` + `next`. Verified live in a pty via `ps`/IPC read-back (one mpv after the switch, none after quit); not verified by ear. Details in `docs/SPRINT2-OVERVIEW.md`.
+
+## Package D: cassette, test sweep (sprint-3 overnight)
+- Base cassette art on the Search screen (swap `theme::CASSETTE`), 125 tests after a per-function sweep, honest note on the missing menu bar widget code. Details and the covered/skipped table in `docs/SPRINT2-OVERVIEW.md`.

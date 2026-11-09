@@ -343,4 +343,11 @@ mod tests {
         assert!(creds_from_json(&serde_json::json!({"web": {"client_id": "i"}})).is_err());
         assert!(creds_from_json(&serde_json::json!({"installed": {"client_id": ""}})).is_err());
     }
+
+    #[test]
+    fn random_bytes_differ_and_now_is_sane() {
+        let (a, b) = (random_bytes::<16>().unwrap(), random_bytes::<16>().unwrap());
+        assert_ne!(a, b);
+        assert!(now() > 1_700_000_000);
+    }
 }

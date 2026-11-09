@@ -489,4 +489,12 @@ mod tests {
         assert_eq!(Loop::All.cycle(), Loop::One);
         assert_eq!(Loop::One.cycle(), Loop::Off);
     }
+
+    #[test]
+    fn rand_below_stays_in_range_and_advances() {
+        let mut q = Queue::new();
+        assert_eq!(q.rand_below(1), 0);
+        let seen: std::collections::HashSet<_> = (0..200).map(|_| q.rand_below(5)).collect();
+        assert!(seen.iter().all(|&x| x < 5) && seen.len() > 1);
+    }
 }

@@ -869,4 +869,97 @@ mod tests {
         assert!(m.contains(&"--input-ipc-server=/tmp/x.sock".into()));
         assert_eq!(m.last().unwrap(), "u");
     }
+
+    /// Serve `reply` to one connection on a fresh socket; returns what the client sent.
+    fn serve(tag: &str, reply: &'static str) -> (PathBuf, std::thread::JoinHandle<String>) {
+        let p = std::env::temp_dir().join(format!("termusic-sv-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let l = std::os::unix::net::UnixListener::bind(&p).unwrap();
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut buf = [0u8; 512];
+            let n = std::io::Read::read(&mut s, &mut buf).unwrap();
+            s.write_all(reply.as_bytes()).unwrap();
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+        (p, h)
+    }
+
+    #[test]
+    fn ipc_to_wraps_the_command_and_errors_without_a_socket() {
+        let (p, h) = serve("ipc", "");
+        ipc_to(&p, r#"["cycle","pause"]"#).unwrap();
+        assert_eq!(h.join().unwrap(), "{\"command\":[\"cycle\",\"pause\"]}\n");
+        assert!(ipc_to(&std::env::temp_dir().join("termusic-none"), "[]").is_err());
+    }
+
+    #[test]
+    fn poll_reads_position_and_duration_and_tolerates_a_dead_socket() {
+        let (p, h) = serve(
+            "poll",
+            "{\"event\":\"x\"}\n{\"data\":1.5,\"request_id\":1,\"error\":\"success\"}\n{\"data\":200.0,\"request_id\":2,\"error\":\"success\"}\n",
+        );
+        assert_eq!(poll(&p), (Some(1.5), Some(200.0)));
+        assert!(h.join().unwrap().contains("time-pos"));
+        assert_eq!(
+            poll(&std::env::temp_dir().join("termusic-none")),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn quiet_detaches_stdio() {
+        // cat exits at once only because stdin is /dev/null
+        assert!(quiet(Command::new("cat")).status().unwrap().success());
+    }
+
+    #[test]
+    fn preloaded_id_and_end_current_keep_the_preload() {
+        let mut p = Player::default();
+        assert_eq!(p.preloaded_id(), None);
+        let r = fake(&mut p, "c", "60");
+        p.set_current(r);
+        let r = fake(&mut p, "n", "60");
+        p.next = Some(r);
+        assert_eq!(p.preloaded_id(), Some("n"));
+        p.position = 9.0;
+        p.end_current();
+        assert!(p.current.is_none() && !p.playing && p.now_playing.is_none());
+        assert_eq!((p.position, p.duration), (0.0, None));
+        assert_eq!(p.preloaded_id(), Some("n"));
+        p.stop();
+    }
+
+    #[test]
+    fn maybe_start_fade_only_in_the_last_seconds_while_playing() {
+        let (mut p, [_lc, ln]) = rig("mfade");
+        p.duration = Some(100.0);
+        p.position = 50.0;
+        p.maybe_start_fade();
+        assert!(p.fade.is_none());
+        p.position = 98.0;
+        p.playing = false;
+        p.maybe_start_fade();
+        assert!(p.fade.is_none());
+        p.playing = true;
+        p.maybe_start_fade();
+        let f = p.fade.as_ref().unwrap();
+        assert!((f.len - 2.0).abs() < 1e-9);
+        assert!(drain(&ln).contains(&pause_json(false)));
+        p.stop();
+    }
+
+    #[test]
+    fn cancel_fade_repauses_preload_and_restores_volume() {
+        let (mut p, [lc, ln]) = rig("cancel");
+        p.cancel_fade(); // no fade: nothing is sent
+        assert!(drain(&lc).is_empty() && drain(&ln).is_empty());
+        start_fade(&mut p, 1.0);
+        p.cancel_fade();
+        assert!(p.fade.is_none());
+        assert!(drain(&lc).contains(&volume_json(80)));
+        let n = drain(&ln);
+        assert!(n.contains(&pause_json(true)) && n.contains(&volume_json(0)));
+        p.stop();
+    }
 }

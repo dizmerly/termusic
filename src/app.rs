@@ -1295,4 +1295,37 @@ mod tests {
         assert!(Screen::Help.is_overlay() && Screen::History.is_overlay());
         assert!(!Screen::Results.is_overlay() && !Screen::Search.is_overlay());
     }
+
+    #[test]
+    fn sync_preload_needs_a_playing_track_and_drops_stale_preloads() {
+        let mut a = app();
+        a.queue.set(vec![track("a"), track("b")], 0);
+        a.sync_preload(); // nothing playing yet: no preload
+        assert!(a.player.preloaded_id().is_none());
+        a.queue.set(vec![track("a")], 0); // nothing follows
+        a.sync_preload();
+        assert!(a.player.preloaded_id().is_none());
+    }
+
+    #[test]
+    fn shutdown_saves_history_and_takes_player_volume() {
+        let dir = scratch("shutdown");
+        let p = dir.join("h.json");
+        let mut a = App::with_paths(Settings::default(), Some(p.clone()));
+        a.player.volume = 33;
+        a.queue.set(vec![track("x")], 0);
+        a.on_event(Event::TrackStarted("x".into()));
+        let _ = std::fs::remove_file(&p);
+        a.shutdown();
+        assert_eq!(a.settings.volume, 33);
+        assert_eq!(history::load(&p).len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn save_settings_without_a_config_path_is_harmless() {
+        let a = app(); // path() is None under test: must not touch the real config
+        a.save_settings();
+        a.save_history();
+    }
 }

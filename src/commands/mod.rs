@@ -91,4 +91,20 @@ mod tests {
         assert!(keys.contains(&'S') && keys.contains(&'H'));
         assert!(keys.contains(&'l') && keys.contains(&',') && keys.contains(&'.'));
     }
+
+    #[test]
+    fn names_and_keys_are_unique_and_labelled() {
+        let all = super::enabled();
+        let mut keys: Vec<_> = all.iter().map(|c| c.key).collect();
+        let mut names: Vec<_> = all.iter().map(|c| c.name).collect();
+        keys.sort_unstable();
+        names.sort_unstable();
+        keys.dedup();
+        names.dedup();
+        assert_eq!((keys.len(), names.len()), (all.len(), all.len()));
+        assert!(all.iter().all(|c| !c.description.is_empty()));
+        assert_eq!(super::all().len(), all.len()); // nothing is switched off today
+        assert_eq!(super::key_label('\n'), "Enter");
+        assert_eq!(super::key_label('p'), "p");
+    }
 }

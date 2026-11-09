@@ -682,4 +682,31 @@ mod tests {
         let s = render(&mut a, 80, 24);
         assert!(s.contains(crate::app::LOGIN_HINT) && s.contains("F1 help"));
     }
+
+    #[test]
+    fn fit_truncates_with_ellipsis() {
+        assert_eq!(fit("abc", 3), "abc");
+        assert_eq!(fit("abcd", 3), "ab…");
+        assert_eq!(fit("世界世界", 3), "世界…");
+        assert_eq!(fit("abc", 0), "…");
+        assert_eq!(fit("", 0), "");
+    }
+
+    #[test]
+    fn list_draws_rows_and_never_panics_when_tiny() {
+        let mut app = App::blank();
+        app.screen = Screen::Results;
+        app.results = (0..5)
+            .map(|i| Track {
+                title: format!("song{i}"),
+                channel: "chan".into(),
+                id: i.to_string(),
+            })
+            .collect();
+        let out = render(&mut app, 80, 24);
+        assert!(out.contains("song0") && out.contains("song4"));
+        for (w, h) in [(1, 1), (3, 3), (10, 2), (80, 4)] {
+            render(&mut app, w, h);
+        }
+    }
 }

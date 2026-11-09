@@ -191,4 +191,14 @@ mod tests {
         );
         assert_eq!(t[1].channel, "");
     }
+
+    #[test]
+    fn unescape_handles_every_entity_once() {
+        assert_eq!(
+            unescape("&quot;a&quot; &#39;b&#39; &lt;c&gt; &amp;"),
+            "\"a\" 'b' <c> &"
+        );
+        assert_eq!(unescape("&amp;lt;"), "&lt;"); // amp last: no double decoding
+        assert_eq!(unescape("plain"), "plain");
+    }
 }
