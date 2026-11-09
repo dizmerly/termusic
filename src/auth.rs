@@ -228,7 +228,11 @@ pub async fn login(on_url: impl Fn(&str)) -> Result<()> {
     .await?;
     match parse(&r, "") {
         Some(t) => save(&t),
-        None => bail!("login failed: {}", r["error"].as_str().unwrap_or("unknown")),
+        None => bail!(
+            "login failed: {} {}",
+            r["error"].as_str().unwrap_or("unknown"),
+            r["error_description"].as_str().unwrap_or("")
+        ),
     }
 }
 
