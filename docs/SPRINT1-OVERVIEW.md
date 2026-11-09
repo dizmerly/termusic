@@ -40,3 +40,4 @@ Certain errors and things to fix
 5. There should be more verbose coverage of commands in the help menu, currently not all commands are properly represented. 
 6. There isnt a settings menu yet, and if there is, there is no clear way to get to it. 
 7. Test coverage overall looks pretty good, but I want every single function to get unit tests, along with more comprehensive unit tests for other items. 
+8. It appears for every new song, the volume is defaulted to a preset rather than carrying across in relation to user settings. 
