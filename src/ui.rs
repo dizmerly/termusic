@@ -264,6 +264,17 @@ mod tests {
     }
 
     #[test]
+    fn bar_shows_shuffle_and_loop_mode() {
+        let mut a = App::new();
+        assert!(!render(&mut a, 80, 24).contains(theme::ICON_LOOP));
+        a.queue.toggle_shuffle();
+        a.queue.looping = Loop::One;
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains(theme::ICON_SHUFFLE));
+        assert!(s.contains(theme::ICON_LOOP_ONE));
+    }
+
+    #[test]
     fn long_titles_keep_channel_visible() {
         let mut a = App::new();
         a.screen = Screen::Results;

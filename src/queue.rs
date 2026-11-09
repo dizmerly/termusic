@@ -81,7 +81,7 @@ impl Queue {
     /// Advance ignoring `Loop::One` (the user asked for the next track).
     pub fn skip(&mut self) -> Option<&Track> {
         self.history.extend(self.current.take());
-        if self.upcoming.is_empty() && self.looping != Loop::Off {
+        if self.upcoming.is_empty() && self.looping == Loop::All {
             let all = std::mem::take(&mut self.history);
             self.set_upcoming(all);
         }
@@ -199,6 +199,53 @@ mod tests {
         assert_eq!(id(q.next()), Some("a"));
         assert!(q.history.is_empty());
         assert_eq!(id(q.skip()), Some("b"));
+    }
+
+    #[test]
+    fn empty_queue_ends_in_every_mode() {
+        for looping in [Loop::Off, Loop::All, Loop::One] {
+            let mut q = Queue::new();
+            q.looping = looping;
+            assert_eq!(q.next(), None);
+            assert_eq!(q.skip(), None);
+        }
+    }
+
+    #[test]
+    fn loop_all_single_track_repeats() {
+        let mut q = q(&["a"], 0);
+        q.looping = Loop::All;
+        assert_eq!(id(q.next()), Some("a"));
+        assert_eq!(id(q.next()), Some("a"));
+    }
+
+    #[test]
+    fn skip_on_loop_one_stops_at_end() {
+        let mut q = q(&["a"], 0);
+        q.looping = Loop::One;
+        assert_eq!(q.skip(), None); // does not wrap like loop all
+    }
+
+    #[test]
+    fn shuffle_on_applies_to_new_and_wrapped_queues() {
+        let names: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        let tracks: Vec<Track> = names.iter().map(|n| t(n)).collect();
+        let mut q = Queue::new();
+        q.rng = 7;
+        q.toggle_shuffle();
+        q.set(tracks.clone(), 3);
+        assert_eq!(id(q.current()), Some("3")); // the chosen track plays first
+        assert_eq!(q.upcoming.len(), 16);
+        assert_ne!(q.upcoming, &tracks[4..]);
+        q.looping = Loop::All;
+        for _ in 0..17 {
+            q.next();
+        }
+        assert_eq!(q.upcoming.len() + 1, 17); // wrapped over everything played
+        q.toggle_shuffle(); // off: order is kept as is
+        let before = q.upcoming.clone();
+        q.set_upcoming(before.iter().cloned().collect());
+        assert_eq!(q.upcoming, before);
     }
 
     #[test]
