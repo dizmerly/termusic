@@ -23,3 +23,20 @@ Screenshots are regenerated with `scripts/capture.py` (needs `pip install pyte p
 
 ## Known gaps / not verified
 Real Google login, PKCE acceptance by Google, token refresh; media keys (spike notes in SPRINT.md; mpv may handle them itself, try it); playlist Enter-to-play against a real playlist; seek/loop-toggle on a real track by ear; shuffle-off does not restore order; loop-all wraps only from the started track on; stepped-back (`b`) tracks survive a new Enter; menu bar widget and cassette art (items 8, 9) not started.
+
+
+
+## My thoughts
+There are definitely some quirks with fixing 
+
+For me, I need to fix the google authentication, firstly I need to give the project its own project, right now for some reason it is being tied to another project, and the other issue is that I need to add a few approved testers so that the account is able to login. 
+Although I think the art is a cherry on top, I'll begin work on it today 
+
+Certain errors and things to fix 
+1. First of all it seems like the preloading isnt working properly, and songs are not being preloaded and crossfaded
+2. For the UI elements, there should be more visual feedback such as having a song completion bar, along with a volume bar. (We will discuss the implementation of this)'
+3. There is no easy way to go back to a song you were playing from pressng Esc, since you enter the search tab, and from there it isn't too clear how to get back it if it was an accidental press. 
+4. The mac menu bar widget only connects the pause, the skip buttons do not work, so that needs to be investigated. 
+5. There should be more verbose coverage of commands in the help menu, currently not all commands are properly represented. 
+6. There isnt a settings menu yet, and if there is, there is no clear way to get to it. 
+7. Test coverage overall looks pretty good, but I want every single function to get unit tests, along with more comprehensive unit tests for other items. 
