@@ -355,7 +355,10 @@ impl App {
             KeyCode::PageUp => self.select(self.selected.saturating_sub(self.page)),
             KeyCode::Char('g') | KeyCode::Home => self.select(0),
             KeyCode::Char('G') | KeyCode::End => self.select(last),
-            KeyCode::Enter if self.screen == Screen::Playlists && !self.busy => {
+            KeyCode::Enter if self.screen == Screen::Playlists => {
+                if self.busy {
+                    return; // never fall through to playing a stale search result
+                }
                 if let Some(p) = self.playlists.get(self.selected) {
                     let id = p.id.clone();
                     self.spawn(async move {
@@ -649,5 +652,14 @@ mod tests {
         assert!(!a.login_prompted && a.status.is_empty());
         press(&mut a, KeyCode::Char('P'));
         assert_eq!(a.screen, Screen::Results); // hint again, not Login
+    }
+
+    #[test]
+    fn busy_enter_on_playlists_does_not_play_results() {
+        let mut a = app();
+        a.screen = Screen::Playlists;
+        a.busy = true;
+        press(&mut a, KeyCode::Enter);
+        assert!(a.queue.current().is_none());
     }
 }
