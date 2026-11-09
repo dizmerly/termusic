@@ -1,0 +1,30 @@
+╭ Help ────────────────────────────────────────────────────────────────────────────────────────────╮
+│Commands                                                                                          │
+│   Enter  play: Play the highlighted track and load related tracks (opens a playlist on Playlists)│
+│       p  pause: Pause or resume the current track.                                               │
+│       n  skip: Skip to the next track (n for next).                                              │
+│       a  queue: Add selected track to the queue (a for add).                                     │
+│       s  shuffle: Toggle shuffle mode for the queue.                                             │
+│       l  loop: Cycle loop: off / all / one (l for loop).                                         │
+│       +  volume_up: Raise the volume (+).                                                        │
+│       -  volume_down: Lower the volume (-).                                                      │
+│       ,  seek_back: Seek back 5s (,).                                                            │
+│       .  seek_forward: Seek forward 5s (.).                                                      │
+│       /  search: Open the search prompt; Enter runs it.                                          │
+│       ?  help: Show this help screen listing every command and keybinding.                       │
+│       q  quit: Quit termusic.                                                                    │
+│                                                                                                  │
+│Navigation (lists)                                                                                │
+│ j/k ↓/↑  move down / up                                                                          │
+│ PgDn/Up  move one page                                                                           │
+│   g / G  jump to first / last                                                                    │
+│       P  your playlists (Enter opens one)                                                        │
+│Esc, ? or q closes this screen.                                                                   │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ▶ Daft Punk - Instant Crush (Official Video) ft. Julian Casablancas                         ? help
