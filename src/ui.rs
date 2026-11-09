@@ -119,13 +119,16 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!(" {icon} "), fg(color).bold()),
         Span::styled(text, fg(color)),
     ];
-    if app.queue.shuffle {
-        spans.push(Span::raw(format!(" {}", theme::ICON_SHUFFLE)));
-    }
-    match app.queue.looping {
-        Loop::Off => {}
-        Loop::All => spans.push(Span::raw(format!(" {}", theme::ICON_LOOP))),
-        Loop::One => spans.push(Span::raw(format!(" {}", theme::ICON_LOOP_ONE))),
+    let loop_icon = match app.queue.looping {
+        Loop::Off => None,
+        Loop::All => Some(theme::ICON_LOOP),
+        Loop::One => Some(theme::ICON_LOOP_ONE),
+    };
+    for icon in [app.queue.shuffle.then_some(theme::ICON_SHUFFLE), loop_icon]
+        .into_iter()
+        .flatten()
+    {
+        spans.push(Span::raw(format!(" {icon}")));
     }
     if app.busy {
         spans.push(Span::styled(

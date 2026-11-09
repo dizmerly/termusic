@@ -100,11 +100,17 @@ impl Queue {
     /// Fisher-Yates over `upcoming` only; `current` is never touched.
     pub fn shuffle_upcoming(&mut self) {
         for i in (1..self.upcoming.len()).rev() {
-            self.rng ^= self.rng << 13;
-            self.rng ^= self.rng >> 7;
-            self.rng ^= self.rng << 17;
-            self.upcoming.swap(i, (self.rng % (i as u64 + 1)) as usize);
+            let j = self.rand_below(i + 1);
+            self.upcoming.swap(i, j);
         }
+    }
+
+    /// xorshift64: good enough to shuffle songs, no dependency.
+    fn rand_below(&mut self, n: usize) -> usize {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        (self.rng % n as u64) as usize
     }
 }
 

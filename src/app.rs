@@ -209,6 +209,12 @@ impl App {
         self.play_current();
     }
 
+    /// User asked for the next track: advance even on loop-one.
+    fn skip(&mut self) {
+        self.queue.skip();
+        self.play_current();
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.quit = true;
@@ -289,10 +295,7 @@ impl App {
                     self.status = e.to_string();
                 }
             }
-            KeyCode::Char('n') => {
-                self.queue.skip();
-                self.play_current();
-            }
+            KeyCode::Char('n') => self.skip(),
             KeyCode::Char(c @ ('+' | '-')) => {
                 if let Err(e) = self.player.volume(if c == '+' { 5 } else { -5 }) {
                     self.status = e.to_string();
