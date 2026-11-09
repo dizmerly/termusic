@@ -67,3 +67,6 @@ Plan: `~/.claude/plans/optimized-launching-eagle.md`. Each item: 3 iterations (c
 
 ## Package B: navigation, help, settings, history (sprint-3 overnight, items 3, 5, 6, 9)
 - Esc/Tab on Search return to the results (hints in the panel titles and bottom bar); Help, Settings and History return to the screen under them through an overlay stack. Help is grouped and scrolls. New `Screen::Settings` (`S`/F3) and `Screen::History` (`H`/F4); `history.json` keeps the last 10 tracks with the position to resume (`mpv --start=N`). File writes go through one background helper (`bg`, serialized, inline without a tokio runtime). See `docs/SPRINT2-OVERVIEW.md` for details and gaps.
+
+## Package C: preload + crossfade (sprint-3 overnight, item 1)
+- Next track's mpv starts paused and silent about 20 s before the end (own socket and watchdog), fades in over the last 4 s while the old one fades out (200 ms IPC steps from `tick`, equal-power, user volume as ceiling), then is promoted without a gap; `n` promotes a ready preload instantly. Stale or failed preloads fall back to the cold spawn. `Player` is `current` + `next`. Verified live in a pty via `ps`/IPC read-back (one mpv after the switch, none after quit); not verified by ear. Details in `docs/SPRINT2-OVERVIEW.md`.
