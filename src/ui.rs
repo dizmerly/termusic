@@ -246,8 +246,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
             format!("{}: {}", c.name, c.description),
         ));
     }
+    // No blank line before Navigation: every row is needed to fit 80x24.
     lines.extend([
-        Line::raw(""),
         head("Navigation (lists)"),
         key("j/k ↓/↑".into(), "move down / up".into()),
         key("PgDn/Up".into(), "move one page".into()),

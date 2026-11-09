@@ -120,6 +120,17 @@ impl Queue {
         self.current.as_ref()
     }
 
+    /// Go back to the last played track; the current one plays next. `None` (no change) at the start.
+    pub fn prev(&mut self) -> Option<&Track> {
+        let back = self.history.pop()?;
+        if let Some(c) = self.current.replace(back) {
+            // Counted as user-queued so a new mix or shuffle keeps it next.
+            self.upcoming.push_front(c);
+            self.user_added += 1;
+        }
+        self.current.as_ref()
+    }
+
     pub fn toggle_shuffle(&mut self) {
         self.shuffle = !self.shuffle;
         // shortcut: turning shuffle off keeps the shuffled order; remember the original if users want it back.
@@ -381,6 +392,35 @@ mod tests {
         for want in ["b", "a", "b", "a"] {
             assert_eq!(id(q.next()), Some(want));
         }
+    }
+
+    #[test]
+    fn prev_goes_back_and_stops_at_start() {
+        let mut q = q(&["a", "b", "c"], 0);
+        assert_eq!(q.prev(), None); // nothing played before: unchanged
+        assert_eq!(id(q.current()), Some("a"));
+        q.skip();
+        q.skip();
+        assert_eq!(id(q.prev()), Some("b"));
+        assert_eq!(ids(&q), ["c"]);
+        assert_eq!(id(q.prev()), Some("a"));
+        assert_eq!(ids(&q), ["b", "c"]);
+        assert_eq!(q.prev(), None);
+        assert_eq!(id(q.skip()), Some("b")); // forward again in the same order
+        assert_eq!(id(q.skip()), Some("c"));
+    }
+
+    #[test]
+    fn prev_after_end_replays_last_and_survives_new_mix() {
+        let mut q = q(&["a", "b"], 0);
+        q.skip();
+        q.skip(); // ended
+        assert_eq!(id(q.prev()), Some("b"));
+        assert!(q.upcoming.is_empty());
+        q.add(t("x"));
+        assert_eq!(id(q.prev()), Some("a"));
+        q.set_upcoming(vec![t("m")]); // the mix keeps the stepped-back track next
+        assert_eq!(ids(&q), ["b", "x", "m"]);
     }
 
     #[test]

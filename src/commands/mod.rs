@@ -4,6 +4,7 @@ pub mod loop_track;
 pub mod pause;
 pub mod play;
 pub mod playlists;
+pub mod prev;
 pub mod queue;
 pub mod quit;
 pub mod search;
@@ -28,12 +29,13 @@ macro_rules! entry {
     };
 }
 
-fn all() -> [(bool, Command); 14] {
+fn all() -> [(bool, Command); 15] {
     entry!(
         play,
         playlists,
         pause,
         skip,
+        prev,
         queue,
         shuffle,
         loop_track,
@@ -80,7 +82,7 @@ mod tests {
     fn every_enabled_command_is_listed_once() {
         let keys: Vec<_> = super::enabled().iter().map(|c| c.key).collect();
         assert!(keys.contains(&'p') && !super::disabled('p'));
-        assert_eq!(keys.len(), 14);
+        assert_eq!(keys.len(), 15);
         assert!(super::requires_login('P') && !super::requires_login('p'));
         assert!(keys.contains(&'l') && keys.contains(&',') && keys.contains(&'.'));
     }

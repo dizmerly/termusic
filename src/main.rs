@@ -1,5 +1,6 @@
 mod app;
 mod auth;
+mod cmd;
 mod commands;
 mod config;
 mod net;

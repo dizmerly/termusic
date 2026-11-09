@@ -1,4 +1,5 @@
 //! Application state and key handling.
+use crate::cmd::{Cmd, Event};
 use crate::commands;
 use crate::player::Player;
 use crate::queue::{Loop, Queue};
@@ -173,8 +174,8 @@ impl App {
                 self.busy = false;
             }
             match m {
-                Msg::Online => self.screen = Screen::Search,
-                Msg::Offline => self.screen = Screen::Offline,
+                Msg::Online => self.on_event(Event::Connection(true)),
+                Msg::Offline => self.on_event(Event::Connection(false)),
                 Msg::Err(e) => {
                     self.status = e;
                     self.login_url = None;
@@ -219,13 +220,58 @@ impl App {
             }
         }
         match self.player.tick() {
-            Some(true) => self.next(),
-            Some(false) => {
+            Some(true) => self.on_event(Event::TrackEnded),
+            Some(false) => self.on_event(Event::TrackFailed),
+            None => {}
+        }
+    }
+
+    /// Apply a playback or connectivity event: the one place they change state.
+    pub fn on_event(&mut self, e: Event) {
+        match e {
+            Event::TrackStarted(id) => {
+                if self.screen != Screen::Playlists
+                    && let Some(i) = self.results.iter().position(|r| r.id == id)
+                {
+                    self.select(i);
+                }
+            }
+            Event::TrackEnded => self.next(),
+            Event::TrackFailed => {
                 self.status =
                     "playback failed — track unavailable, or mpv/yt-dlp missing (n = next)".into()
             }
-            None => {}
+            Event::Connection(true) => self.screen = Screen::Search,
+            Event::Connection(false) => self.screen = Screen::Offline,
         }
+    }
+
+    /// Perform a playback command (from a key today; media keys later).
+    pub fn dispatch(&mut self, c: Cmd) {
+        let r = match c {
+            Cmd::PlayPause => self.player.toggle_pause(),
+            Cmd::Next => {
+                self.skip();
+                Ok(())
+            }
+            Cmd::Prev => {
+                if self.queue.prev().is_some() {
+                    self.play_current();
+                }
+                Ok(())
+            }
+            Cmd::Seek(s) => self.player.seek(s),
+            Cmd::Volume(d) => self.player.volume(d),
+            Cmd::ToggleShuffle => {
+                self.queue.toggle_shuffle();
+                Ok(())
+            }
+            Cmd::CycleLoop => {
+                self.queue.looping = self.queue.looping.cycle();
+                self.player.set_loop_file(self.queue.looping == Loop::One)
+            }
+        };
+        self.show_err(r);
     }
 
     /// Show a playlist and make it the queue, in order. False (nothing changed) if it is empty.
@@ -254,13 +300,9 @@ impl App {
             self.player.stop();
             return;
         };
-        if self.screen != Screen::Playlists
-            && let Some(i) = self.results.iter().position(|r| r.id == t.id)
-        {
-            self.select(i);
-        }
-        if let Err(e) = self.player.play(&t, self.queue.looping == Loop::One) {
-            self.status = e.to_string();
+        match self.player.play(&t, self.queue.looping == Loop::One) {
+            Ok(()) => self.on_event(Event::TrackStarted(t.id)),
+            Err(e) => self.status = e.to_string(),
         }
     }
 
@@ -347,6 +389,9 @@ impl App {
         {
             return;
         }
+        if let Some(c) = crate::cmd::from_key(key) {
+            return self.dispatch(c);
+        }
         let last = self.len().saturating_sub(1);
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.select(self.selected.saturating_add(1)),
@@ -380,26 +425,7 @@ impl App {
                     });
                 }
             }
-            KeyCode::Char('p') => {
-                let r = self.player.toggle_pause();
-                self.show_err(r);
-            }
-            KeyCode::Char('n') => self.skip(),
             KeyCode::Char('a') if self.screen == Screen::Results => self.queue_selected(),
-            KeyCode::Char(c @ ('+' | '-')) => {
-                let r = self.player.volume(if c == '+' { 5 } else { -5 });
-                self.show_err(r);
-            }
-            KeyCode::Char(c @ (',' | '.')) => {
-                let r = self.player.seek(if c == '.' { 5 } else { -5 });
-                self.show_err(r);
-            }
-            KeyCode::Char('s') => self.queue.toggle_shuffle(),
-            KeyCode::Char('l') => {
-                self.queue.looping = self.queue.looping.cycle();
-                let r = self.player.set_loop_file(self.queue.looping == Loop::One);
-                self.show_err(r);
-            }
             KeyCode::Char('P') | KeyCode::F(2) => self.open_playlists(),
             KeyCode::Char('/') | KeyCode::Esc => self.screen = Screen::Search,
             KeyCode::Char('?') => self.open_help(),
@@ -652,6 +678,36 @@ mod tests {
         assert!(!a.login_prompted && a.status.is_empty());
         press(&mut a, KeyCode::Char('P'));
         assert_eq!(a.screen, Screen::Results); // hint again, not Login
+    }
+
+    #[test]
+    fn dispatch_drives_queue() {
+        // Only paths that never start mpv: Queue::prev's moves are tested in queue.rs.
+        let mut a = app();
+        a.queue.set(a.results.clone(), 29);
+        a.dispatch(Cmd::Prev); // at the start: nothing changes
+        assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("29"));
+        a.dispatch(Cmd::Next); // last track: the queue ends
+        assert!(a.queue.current().is_none() && a.player.now_playing.is_none());
+        a.dispatch(Cmd::ToggleShuffle);
+        a.dispatch(Cmd::CycleLoop);
+        assert!(a.queue.shuffle && a.queue.looping == Loop::All);
+    }
+
+    #[test]
+    fn events_drive_state() {
+        let mut a = app();
+        a.on_event(Event::TrackStarted("7".into()));
+        assert_eq!(a.selected, 7);
+        a.on_event(Event::TrackFailed);
+        assert!(a.status.starts_with("playback failed"));
+        a.on_event(Event::Connection(false));
+        assert_eq!(a.screen, Screen::Offline);
+        a.on_event(Event::Connection(true));
+        assert_eq!(a.screen, Screen::Search);
+        a.queue.set(a.results.clone(), 29);
+        a.on_event(Event::TrackEnded); // last track: queue ends
+        assert!(a.queue.current().is_none());
     }
 
     #[test]
