@@ -17,7 +17,7 @@ pub struct Tokens {
 }
 
 pub fn token_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("termusic").join("tokens.json"))
+    crate::settings::config_dir().map(|d| d.join("tokens.json"))
 }
 
 pub fn is_logged_in() -> bool {

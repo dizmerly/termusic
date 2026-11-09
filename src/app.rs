@@ -93,7 +93,7 @@ impl App {
             selected: 0,
             offset: 0,
             page: 10,
-            player: Player::default(),
+            player: Player::new(crate::settings::Settings::load().volume),
             queue: Queue::new(),
             status: crate::player::missing_deps().unwrap_or_default(),
             quit: false,
@@ -263,7 +263,14 @@ impl App {
                 Ok(())
             }
             Cmd::Seek(s) => self.player.seek(s),
-            Cmd::Volume(d) => self.player.volume(d),
+            Cmd::Volume(d) => {
+                let r = self.player.change_volume(d);
+                crate::settings::Settings {
+                    volume: self.player.volume,
+                }
+                .save();
+                r
+            }
             Cmd::ToggleShuffle => {
                 self.queue.toggle_shuffle();
                 Ok(())

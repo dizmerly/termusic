@@ -6,6 +6,7 @@ mod config;
 mod net;
 mod player;
 mod queue;
+mod settings;
 mod theme;
 mod ui;
 mod youtube;
@@ -72,5 +73,9 @@ fn run_tui() -> Result<()> {
         Ok(())
     })();
     ratatui::restore();
+    settings::Settings {
+        volume: app.player.volume,
+    }
+    .save();
     res
 }

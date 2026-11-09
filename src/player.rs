@@ -2,18 +2,29 @@
 use crate::youtube::Track;
 use anyhow::{Context, Result};
 use std::{
-    io::Write,
+    io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Player {
     pub playing: bool,
     pub now_playing: Option<String>,
+    /// 0..=100; owned here so every new mpv starts with it.
+    pub volume: u8,
+    /// Seconds into the current track.
+    pub position: f64,
+    pub duration: Option<f64>,
     running: Option<Running>,
+}
+
+impl Default for Player {
+    fn default() -> Self {
+        Self::new(crate::settings::DEFAULT_VOLUME)
+    }
 }
 
 /// mpv plus the watchdog that kills it if this app dies without running `Drop` (SIGKILL).
@@ -22,6 +33,7 @@ struct Running {
     mpv: Child,
     watchdog: Child,
     started: Instant,
+    polled: Instant,
 }
 
 fn sock(app_pid: u32) -> PathBuf {
@@ -32,17 +44,18 @@ fn app_sock() -> PathBuf {
     sock(std::process::id())
 }
 
-fn mpv_command(url: &str, sock: &std::path::Path, loop_file: bool) -> Command {
+fn mpv_command(url: &str, sock: &std::path::Path, loop_file: bool, volume: u8) -> Command {
     let mut c = Command::new("mpv");
     c.args(["--no-video", "--no-terminal", "--ytdl-format=bestaudio"])
+        .arg(format!("--volume={volume}"))
         .arg(format!("--input-ipc-server={}", sock.display()))
         .args(loop_file.then_some("--loop-file=inf"))
         .arg(url);
     c
 }
 
-fn volume_json(delta: i32) -> String {
-    format!(r#"["add","volume",{delta}]"#)
+fn volume_json(vol: u8) -> String {
+    format!(r#"["set_property","volume",{vol}]"#)
 }
 
 fn seek_json(delta: i32) -> String {
@@ -72,11 +85,22 @@ pub fn missing_deps() -> Option<String> {
 }
 
 impl Player {
+    pub fn new(volume: u8) -> Self {
+        Self {
+            playing: false,
+            now_playing: None,
+            volume: volume.min(100),
+            position: 0.0,
+            duration: None,
+            running: None,
+        }
+    }
+
     /// Play `t`; `loop_file` repeats it until told otherwise (`set_loop_file`).
     pub fn play(&mut self, t: &Track, loop_file: bool) -> Result<()> {
         self.stop();
         let url = format!("https://www.youtube.com/watch?v={}", t.id);
-        let mpv = quiet(mpv_command(&url, &app_sock(), loop_file))
+        let mpv = quiet(mpv_command(&url, &app_sock(), loop_file, self.volume))
             .spawn()
             .context("cannot start mpv (mpv and yt-dlp must be on PATH)")?;
         self.attach(mpv, &t.title)
@@ -90,7 +114,10 @@ impl Player {
                     mpv,
                     watchdog,
                     started: Instant::now(),
+                    polled: Instant::now(),
                 });
+                self.position = 0.0;
+                self.duration = None;
                 self.now_playing = Some(title.to_owned());
                 self.playing = true;
                 Ok(())
@@ -113,6 +140,8 @@ impl Player {
         let _ = std::fs::remove_file(app_sock());
         self.playing = false;
         self.now_playing = None;
+        self.position = 0.0;
+        self.duration = None;
     }
 
     /// Send one JSON command to the running mpv (no-op when nothing is playing).
@@ -133,8 +162,10 @@ impl Player {
         Ok(())
     }
 
-    pub fn volume(&self, delta: i32) -> Result<()> {
-        self.ipc(&volume_json(delta))
+    /// Change the volume by `delta` points (clamped); the new value sticks even if mpv isn't ready.
+    pub fn change_volume(&mut self, delta: i32) -> Result<()> {
+        self.volume = (i32::from(self.volume) + delta).clamp(0, 100) as u8;
+        self.ipc(&volume_json(self.volume))
     }
 
     /// Jump `delta` seconds (negative = back) in the current track.
@@ -152,11 +183,43 @@ impl Player {
     /// immediate exit (mpv/yt-dlp failure) so the caller doesn't skip through the list.
     pub fn tick(&mut self) -> Option<bool> {
         let r = self.running.as_mut()?;
-        r.mpv.try_wait().ok().flatten()?;
+        if r.mpv.try_wait().ok().flatten().is_none() {
+            if r.polled.elapsed() >= Duration::from_secs(1) {
+                r.polled = Instant::now();
+                if let Some(p) = get_property("time-pos") {
+                    self.position = p;
+                }
+                if let Some(d) = get_property("duration") {
+                    self.duration = Some(d);
+                }
+            }
+            return None;
+        }
         let ok = r.started.elapsed() > Duration::from_secs(3);
         self.stop();
         Some(ok)
     }
+}
+
+/// Read one numeric mpv property; short timeouts so the UI thread never stalls.
+fn get_property(name: &str) -> Option<f64> {
+    let t = Duration::from_millis(50);
+    let mut s = UnixStream::connect(app_sock()).ok()?;
+    s.set_read_timeout(Some(t)).ok()?;
+    s.set_write_timeout(Some(t)).ok()?;
+    writeln!(
+        s,
+        r#"{{"command":["get_property","{name}"],"request_id":7}}"#
+    )
+    .ok()?;
+    // mpv interleaves async events with replies: skip lines until ours.
+    BufReader::new(s)
+        .lines()
+        .take(8)
+        .map_while(Result::ok)
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+        .find(|v| v["request_id"] == 7)
+        .and_then(|v| v["data"].as_f64())
 }
 
 /// Detach a child from the terminal: no stdin/stdout/stderr.
@@ -275,9 +338,19 @@ mod tests {
 
     #[test]
     fn ipc_json() {
-        assert_eq!(volume_json(-5), r#"["add","volume",-5]"#);
+        assert_eq!(volume_json(80), r#"["set_property","volume",80]"#);
         assert_eq!(seek_json(5), r#"["seek",5,"relative"]"#);
         assert_eq!(seek_json(-5), r#"["seek",-5,"relative"]"#);
+    }
+
+    #[test]
+    fn volume_clamps() {
+        let mut p = Player::new(98);
+        p.change_volume(5).unwrap();
+        assert_eq!(p.volume, 100);
+        p.change_volume(-250).unwrap();
+        assert_eq!(p.volume, 0);
+        assert_eq!(Player::new(200).volume, 100);
     }
 
     #[test]
@@ -290,11 +363,12 @@ mod tests {
         };
         let w = args(&watchdog_command(1, 2, s));
         assert_eq!(w[3..], ["1", "2", "/tmp/x.sock"]);
-        let m = args(&mpv_command("u", s, true));
+        let m = args(&mpv_command("u", s, true, 42));
         assert!(m.contains(&"--no-video".into()));
         assert!(m.contains(&"--loop-file=inf".into()));
+        assert!(m.contains(&"--volume=42".into()));
         assert!(
-            !args(&mpv_command("u", s, false))
+            !args(&mpv_command("u", s, false, 42))
                 .iter()
                 .any(|a| a.starts_with("--loop"))
         );

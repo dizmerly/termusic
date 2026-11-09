@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{List, ListItem, Paragraph, Wrap},
+    widgets::{Block, List, ListItem, Paragraph, Wrap},
 };
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -114,6 +114,33 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_next(f, app, next);
     }
     draw_bar(f, app, bar);
+    draw_volume(f, app.player.volume, f.area());
+}
+
+/// `filled`/`░` bar of `width` cells for a 0..=1 fraction.
+fn bar(frac: f64, width: usize) -> String {
+    let n = (frac.clamp(0.0, 1.0) * width as f64).round() as usize;
+    "█".repeat(n) + &"░".repeat(width - n)
+}
+
+fn mmss(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    format!("{:02}:{:02}", s / 60, s % 60)
+}
+
+/// `♪ ████████░░ 80%` in the top-right corner, skipped when it would crowd the screen.
+fn draw_volume(f: &mut Frame, vol: u8, area: Rect) {
+    const W: u16 = 17;
+    if area.width < 40 || area.height == 0 {
+        return;
+    }
+    let text = format!(
+        "{} {} {vol:>3}%",
+        theme::ICON_NOTE,
+        bar(f64::from(vol) / 100.0, 10)
+    );
+    let r = Rect::new(area.right() - W, area.y, W, 1);
+    f.render_widget(Paragraph::new(Span::styled(text, fg(theme::PINK))), r);
 }
 
 /// `next: A · B · C` for the next three tracks, cut to the width.
@@ -161,14 +188,24 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
     if !app.status.is_empty() {
         spans.push(Span::styled(format!("  {}", app.status), fg(theme::ORANGE)));
     }
-    f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::new().bg(theme::BAR_BG)),
-        area,
-    );
-    f.render_widget(
-        Paragraph::new(Span::styled("? help ", fg(theme::PINK))).alignment(Alignment::Right),
-        area,
-    );
+    // Right side: progress (only with a known length and room) then the help hint.
+    let mut right = vec![Span::styled("? help ", fg(theme::PINK))];
+    if let (Some(d), true) = (app.player.duration, area.width >= 60) {
+        let time = format!("{} / {}  ", mmss(app.player.position), mmss(d));
+        right.insert(
+            0,
+            Span::styled(
+                format!("{} {time}", bar(app.player.position / d.max(1.0), 10)),
+                fg(theme::CYAN),
+            ),
+        );
+    }
+    let rw = right.iter().map(Span::width).sum::<usize>() as u16;
+    let [left, right_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(rw)]).areas(area);
+    f.render_widget(Block::new().style(Style::new().bg(theme::BAR_BG)), area);
+    f.render_widget(Paragraph::new(Line::from(spans)), left);
+    f.render_widget(Paragraph::new(Line::from(right)), right_area);
 }
 
 fn draw_list(
@@ -285,6 +322,31 @@ mod tests {
         assert!(s.contains("Open the search prompt"));
         assert!(s.contains("Your playlists (F2 on Search)"));
         assert!(s.contains("Back to the previous track"));
+    }
+
+    #[test]
+    fn bars_and_time() {
+        assert_eq!(bar(0.5, 10), "█████░░░░░");
+        assert_eq!(bar(2.0, 4), "████");
+        assert_eq!(bar(-1.0, 4), "░░░░");
+        assert_eq!(mmss(75.9), "01:15");
+        assert_eq!(mmss(-3.0), "00:00");
+    }
+
+    #[test]
+    fn volume_and_progress_render() {
+        let mut a = App::new();
+        a.player.volume = 80;
+        a.player.position = 65.0;
+        a.player.duration = Some(185.0);
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains("♪ ████████░░  80%"), "volume");
+        assert!(s.contains("01:05 / 03:05") && s.contains("? help"));
+        let s = render(&mut a, 50, 24); // narrow: no progress
+        assert!(!s.contains("01:05") && s.contains("80%"));
+        let s = render(&mut a, 30, 24); // tiny: no volume, no panic
+        assert!(!s.contains("80%"));
+        render(&mut a, 40, 1);
     }
 
     #[test]
