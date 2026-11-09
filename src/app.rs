@@ -187,6 +187,7 @@ impl App {
                     }
                 }
                 Msg::Playlists(v) => self.playlists = v,
+                // shortcut: applies even if the user moved on meanwhile; add an id check like Related if it bites.
                 Msg::PlaylistTracks(v) => {
                     if self.load_playlist(v) {
                         self.play_current();

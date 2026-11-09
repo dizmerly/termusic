@@ -23,7 +23,7 @@ In the [Google Cloud console](https://console.cloud.google.com/apis/credentials)
 cargo run
 ```
 
-Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track to play it. To use playlists, press `P` and choose **Enter** to sign in: your browser opens, you approve, and the app continues on its own.
+Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track to play it. Playlists need Google sign-in: press `P` (`F2` on Search) and, if you are signed out, the status bar says so; press `P` again to reach the Login screen, then **Enter**: your browser opens, you approve, and the app continues on its own. You can also run `termusic login`.
 
 ## Behavior
 
@@ -35,17 +35,17 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 ### Screens
 | Screen | What it does |
 |--------|--------------|
-| Login | Optional Google sign-in (opened with `P` when signed out). Opens your browser; shows the URL while waiting. `Esc` goes back. |
+| Login | Optional Google sign-in (press `P` twice when signed out). Opens your browser; shows the URL while waiting. `Esc` goes back. |
 | Search | Text prompt. `Enter` runs the query (via `yt-dlp`, no account needed) and shows the top 30 results. `Esc` quits. |
 | Results | Scrollable list of tracks (title and channel). Text only, no thumbnails. |
-| Playlists | Your YouTube playlists (needs sign-in). `Enter` opens one (first 50 tracks). |
+| Playlists | Your YouTube playlists (needs sign-in). `Enter` loads the playlist (first 50 tracks) as the queue, in order, and plays the first track; the list then shows it. |
 | Help | Lists every enabled command and keybinding. |
 | Offline | Shown whenever a network action finds no connection. |
 
 ### Keys
 | Key | Action |
 |-----|--------|
-| `Enter` | Play the highlighted track and replace the list with its YouTube mix (related tracks; `n` follows it). Playlists: open the playlist, which keeps its own order |
+| `Enter` | Play the highlighted track and replace the list with its YouTube mix (related tracks; `n` follows it). Playlists: play the playlist from its first track, in its own order |
 | `a` | Add the highlighted result to the queue (plays after the current track, before the mix) |
 | `p` | Pause / resume |
 | `n` | Next track |
@@ -54,7 +54,7 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 | `+` / `-` | Volume up / down |
 | `,` / `.` | Seek back / forward 5s |
 | `/` | New search |
-| `P` | Your playlists |
+| `P` (`F2` on the Search screen) | Your playlists; signed out, a status message asks you to log in |
 | `j` / `↓`, `k` / `↑` | Move selection |
 | `PgDn` / `PgUp` | Move one page |
 | `g` / `G` | Jump to first / last |
