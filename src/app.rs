@@ -203,6 +203,14 @@ impl App {
         }
     }
 
+    /// Queue the highlighted result without starting playback.
+    fn queue_selected(&mut self) {
+        if let Some(t) = self.results.get(self.selected).cloned() {
+            self.status = format!("queued: {}", t.title);
+            self.queue.add(t);
+        }
+    }
+
     /// Track ended: advance the queue (repeats on loop-one).
     fn next(&mut self) {
         self.queue.next();
@@ -296,12 +304,7 @@ impl App {
                 }
             }
             KeyCode::Char('n') => self.skip(),
-            KeyCode::Char('a') if self.screen == Screen::Results => {
-                if let Some(t) = self.results.get(self.selected).cloned() {
-                    self.status = format!("queued: {}", t.title);
-                    self.queue.add(t);
-                }
-            }
+            KeyCode::Char('a') if self.screen == Screen::Results => self.queue_selected(),
             KeyCode::Char(c @ ('+' | '-')) => {
                 if let Err(e) = self.player.volume(if c == '+' { 5 } else { -5 }) {
                     self.status = e.to_string();
