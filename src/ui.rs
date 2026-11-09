@@ -329,4 +329,13 @@ mod tests {
         assert!(render(&mut a, 80, 24).contains("Artist"));
         render(&mut a, 20, 5); // tiny terminal must not panic
     }
+
+    #[test]
+    fn login_hint_fully_visible_on_search() {
+        let mut a = App::new();
+        a.screen = Screen::Search;
+        a.status = crate::app::LOGIN_HINT.into();
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains(crate::app::LOGIN_HINT) && s.contains("? help"));
+    }
 }
