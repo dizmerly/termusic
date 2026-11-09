@@ -5,24 +5,36 @@ use ratatui::{
 };
 
 /// All lines must be the same width: `Paragraph` centers each line separately.
-pub const LOGO: [&str; 3] = [
-    "╔╦╗╔═╗╦═╗╔╦╗╦ ╦╔═╗╦╔═╗",
-    " ║ ║╣ ╠╦╝║║║║ ║╚═╗║║  ",
-    " ╩ ╚═╝╩╚═╩ ╩╚═╝╚═╝╩╚═╝",
+pub const LOGO: [&str; 8] = [
+    r" _________  _______   ________  _____ ______   ___  ___  ________  ___  ________     ",
+    r"|\___   ___\\  ___ \ |\   __  \|\   _ \  _   \|\  \|\  \|\   ____\|\  \|\   ____\    ",
+    r"\|___ \  \_\ \   __/|\ \  \|\  \ \  \\\__\ \  \ \  \\\  \ \  \___|\ \  \ \  \___|    ",
+    r"     \ \  \ \ \  \_|/_\ \   _  _\ \  \\|__| \  \ \  \\\  \ \_____  \ \  \ \  \       ",
+    r"      \ \  \ \ \  \_|\ \ \  \\  \\ \  \    \ \  \ \  \\\  \|____|\  \ \  \ \  \____  ",
+    r"       \ \__\ \ \_______\ \__\\ _\\ \__\    \ \__\ \_______\____\_\  \ \__\ \_______\",
+    r"        \|__|  \|_______|\|__|\|__|\|__|     \|__|\|_______|\_________\|__|\|_______|",
+    r"                                                            \|_________|             ",
 ];
 
-/// Cassette art. To replace it: keep every line the same width, and mark each
-/// reel hub with `@` (swapped for a spinning glyph each frame).
-pub const CASSETTE: [&str; 6] = [
-    "╭────────────────────╮",
-    "│ ╭────────────────╮ │",
-    "│ │  (@)      (@)  │ │",
-    "│ ╰────────────────╯ │",
-    "│     ╭────────╮     │",
-    "╰─────┴────────┴─────╯",
+/// Cassette art. Keep every line the same width. `@` marks a reel hub (swapped for a
+/// spinning glyph each frame); the `#` run is the now-playing field.
+pub const CASSETTE: [&str; 13] = [
+    r#"   ____________________________ "#,
+    r#" /|............................|"#,
+    r#"| |:##########################:|"#,
+    r#"| |:                          :|"#,
+    r#"| |:     ,-.   _____   ,-.    :|"#,
+    r#"| |:    ( @)) [_____] ( @))   :|"#,
+    r#"|v|:     `-`   ' ' '   `-`    :|"#,
+    r#"|||:     ,______________.     :|"#,
+    r#"|||...../::::o::::::o::::\.....|"#,
+    r#"|^|..../:::O::::::::::O:::\....|"#,
+    r#"|/`---/--------------------`---|"#,
+    r#"`.___/ /====/ /=//=/ /====/____/"#,
+    r#"     `--------------------'     "#,
 ];
 /// Frames for a spinning reel hub.
-pub const REEL_FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
+pub const REEL_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
 
 pub const ICON_NOTE: &str = "♪";
 pub const ICON_PLAY: &str = "▶";
@@ -42,7 +54,7 @@ pub const ROW_BG: Color = Color::Rgb(58, 42, 92);
 pub const BAR_BG: Color = Color::Rgb(30, 30, 46);
 
 /// One color per logo line, top to bottom.
-pub const LOGO_GRADIENT: [Color; 3] = [PINK, YELLOW, CYAN];
+pub const LOGO_GRADIENT: [Color; 8] = [PINK, PINK, ORANGE, YELLOW, GREEN, CYAN, CYAN, PURPLE];
 
 pub fn title() -> Style {
     Style::default().fg(PINK).add_modifier(Modifier::BOLD)

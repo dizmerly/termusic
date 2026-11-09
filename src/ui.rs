@@ -21,7 +21,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Length(if app.screen == Screen::Help || f.area().height < 20 {
             0
         } else {
-            6
+            8
         }),
         Constraint::Min(3),
         Constraint::Length(u16::from(show_next)),
@@ -109,15 +109,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 body.width.saturating_sub(2),
                 body.height.saturating_sub(3),
             );
-            let spin = if app.player.playing {
-                app.player.position as usize
-            } else {
-                0
-            };
-            let lines = cassette_lines(spin);
-            if art.height >= lines.len() as u16 && art.width >= lines[0].width() as u16 {
-                f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), art);
-            }
+            draw_cassette(f, app, art);
         }
         Screen::Help => draw_help(f, app, body),
         Screen::Settings => draw_settings(f, app, body),
@@ -132,6 +124,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 app.results.len()
             );
             let rows = std::mem::take(&mut app.results);
+            let body = cassette_above(f, app, body);
             draw_list(f, app, &rows, &title, theme::PURPLE, body);
             app.results = rows;
         }
@@ -149,12 +142,24 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_volume(f, app.player.volume, f.area());
 }
 
-/// Cassette art with spinning reels; `spin` picks the frame (0 when idle).
-fn cassette_lines(spin: usize) -> Vec<Line<'static>> {
+/// Cassette art with spinning reels; `spin` picks the frame (0 when idle) and
+/// `now` is the now-playing text shown on the label.
+fn cassette_lines(spin: usize, now: &str) -> Vec<Line<'static>> {
     let reel = theme::REEL_FRAMES[spin % theme::REEL_FRAMES.len()].to_string();
     theme::CASSETTE
         .iter()
         .map(|l| {
+            let field = l.matches('#').count();
+            let l = if field > 0 {
+                let t = if now.is_empty() {
+                    String::new()
+                } else {
+                    fit(now, field)
+                };
+                l.replace(&"#".repeat(field), &format!("{t:^field$}"))
+            } else {
+                (*l).to_owned()
+            };
             let mut spans = Vec::new();
             for (i, part) in l.split('@').enumerate() {
                 if i > 0 {
@@ -165,6 +170,36 @@ fn cassette_lines(spin: usize) -> Vec<Line<'static>> {
             Line::from(spans)
         })
         .collect()
+}
+
+/// Draws the cassette centered in `area` if it fits; reels spin only while playing.
+fn draw_cassette(f: &mut Frame, app: &App, area: Rect) {
+    let spin = if app.player.playing {
+        app.player.position as usize
+    } else {
+        0
+    };
+    // Same text as the status bar.
+    let now = match (&app.player.now_playing, app.player.playing) {
+        (Some(t), true) => format!("{} {t}", theme::ICON_PLAY),
+        (Some(t), false) => format!("{} {t}", theme::ICON_PAUSE),
+        _ => "nothing playing".into(),
+    };
+    let lines = cassette_lines(spin, &now);
+    if area.height >= lines.len() as u16 && area.width >= lines[0].width() as u16 {
+        f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
+    }
+}
+
+/// Reserves a cassette strip at the top of `body` when there's room; returns the rest.
+fn cassette_above(f: &mut Frame, app: &App, body: Rect) -> Rect {
+    let h = theme::CASSETTE.len() as u16;
+    if body.height < h + 6 || body.width < theme::CASSETTE[0].len() as u16 {
+        return body;
+    }
+    let [top, rest] = Layout::vertical([Constraint::Length(h), Constraint::Min(3)]).areas(body);
+    draw_cassette(f, app, top);
+    rest
 }
 
 /// `filled`/`░` bar of `width` cells for a 0..=1 fraction.
@@ -497,19 +532,23 @@ mod tests {
     fn cassette_shows_when_roomy_hides_when_small_and_spins() {
         use unicode_width::UnicodeWidthStr;
         let text = |l: &[Line]| l.iter().map(|l| l.to_string()).collect::<Vec<_>>();
-        let (a, b) = (text(&cassette_lines(0)), text(&cassette_lines(1)));
+        let (a, b) = (text(&cassette_lines(0, "x")), text(&cassette_lines(1, "x")));
         assert_ne!(a, b);
-        assert_eq!(a, text(&cassette_lines(theme::REEL_FRAMES.len())));
-        assert!(a.iter().all(|l| !l.contains('@')));
+        assert_eq!(a, text(&cassette_lines(theme::REEL_FRAMES.len(), "x")));
+        assert!(a.iter().all(|l| !l.contains('@') && !l.contains('#')));
+        assert!(a.iter().any(|l| l.contains(" x ")));
         let w = a[0].width();
         assert!(a.iter().all(|l| l.width() == w));
 
         let mut app = App::blank();
         app.screen = Screen::Search;
-        assert!(render(&mut app, 80, 30).contains('◐'));
+        assert!(render(&mut app, 80, 30).contains("[_____]"));
         for (w, h) in [(80, 8), (20, 30), (1, 1), (80, 3)] {
-            assert!(!render(&mut app, w, h).contains('◐'), "{w}x{h}");
+            assert!(!render(&mut app, w, h).contains("[_____]"), "{w}x{h}");
         }
+        app.screen = Screen::Results;
+        assert!(render(&mut app, 80, 40).contains("[_____]"));
+        assert!(!render(&mut app, 80, 20).contains("[_____]"));
     }
 
     #[test]
