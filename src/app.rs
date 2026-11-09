@@ -699,6 +699,12 @@ mod tests {
         let mut a = app();
         a.on_event(Event::TrackStarted("7".into()));
         assert_eq!(a.selected, 7);
+        a.on_event(Event::TrackStarted("unknown".into()));
+        assert_eq!(a.selected, 7);
+        a.screen = Screen::Playlists; // the playlist list keeps its own selection
+        a.on_event(Event::TrackStarted("3".into()));
+        assert_eq!(a.selected, 7);
+        a.screen = Screen::Results;
         a.on_event(Event::TrackFailed);
         assert!(a.status.starts_with("playback failed"));
         a.on_event(Event::Connection(false));

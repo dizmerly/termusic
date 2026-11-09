@@ -121,6 +121,7 @@ impl Queue {
     }
 
     /// Go back to the last played track; the current one plays next. `None` (no change) at the start.
+    // shortcut: a loop-all wrap clears history, so prev stops at the start of each lap; keep laps if users miss it.
     pub fn prev(&mut self) -> Option<&Track> {
         let back = self.history.pop()?;
         if let Some(c) = self.current.replace(back) {
@@ -293,6 +294,7 @@ mod tests {
             q.looping = looping;
             assert_eq!(q.next(), None);
             assert_eq!(q.skip(), None);
+            assert_eq!(q.prev(), None);
         }
     }
 
@@ -421,6 +423,28 @@ mod tests {
         assert_eq!(id(q.prev()), Some("a"));
         q.set_upcoming(vec![t("m")]); // the mix keeps the stepped-back track next
         assert_eq!(ids(&q), ["b", "x", "m"]);
+    }
+
+    #[test]
+    fn prev_track_stays_next_when_shuffling() {
+        let all: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        let refs: Vec<&str> = all.iter().map(String::as_str).collect();
+        let mut q = q(&refs, 0);
+        q.skip();
+        q.prev();
+        q.toggle_shuffle();
+        assert_eq!(ids(&q)[0], "1");
+        assert_eq!(id(q.next()), Some("1"));
+    }
+
+    #[test]
+    fn prev_stops_at_start_of_loop_all_lap() {
+        let mut q = q(&["a", "b"], 0);
+        q.looping = Loop::All;
+        q.next();
+        q.next(); // wrapped: history starts over
+        assert_eq!(q.prev(), None);
+        assert_eq!(id(q.current()), Some("a"));
     }
 
     #[test]

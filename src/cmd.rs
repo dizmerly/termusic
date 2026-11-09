@@ -1,7 +1,7 @@
 //! Playback commands (what the user asks for) and player events (what happened).
 //! TUI keys map to `Cmd` here; media keys or a menu-bar helper can send the same `Cmd`s.
 use crate::commands;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Volume and seek step per key press.
 const STEP: i32 = 5;
@@ -36,7 +36,12 @@ pub fn from_key(key: KeyEvent) -> Option<Cmd> {
     let KeyCode::Char(c) = key.code else {
         return None;
     };
-    if commands::disabled(c) {
+    // Ctrl/Alt chords are not ours (Shift is: `+` often arrives with it).
+    if commands::disabled(c)
+        || key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
         return None;
     }
     Some(match c {
@@ -56,7 +61,6 @@ pub fn from_key(key: KeyEvent) -> Option<Cmd> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyModifiers;
 
     fn key(c: KeyCode) -> Option<Cmd> {
         from_key(KeyEvent::new(c, KeyModifiers::NONE))
@@ -86,6 +90,14 @@ mod tests {
         }
         assert_eq!(key(KeyCode::Enter), None);
         assert_eq!(key(KeyCode::Down), None);
+    }
+
+    #[test]
+    fn modifiers() {
+        let k = |c, m| from_key(KeyEvent::new(KeyCode::Char(c), m));
+        assert_eq!(k('+', KeyModifiers::SHIFT), Some(Cmd::Volume(5)));
+        assert_eq!(k('p', KeyModifiers::CONTROL), None);
+        assert_eq!(k('n', KeyModifiers::ALT), None);
     }
 
     #[test]
