@@ -362,6 +362,25 @@ mod tests {
     }
 
     #[test]
+    fn set_without_matching_queued_track_keeps_queue() {
+        let mut q = q(&["a"], 0);
+        q.add(t("x"));
+        q.set(vec![t("m"), t("n")], 0);
+        assert_eq!(ids(&q), ["x", "n"]);
+        assert_eq!(q.user_added, 1);
+    }
+
+    #[test]
+    fn loop_all_two_tracks_shuffled_alternate() {
+        let mut q = q(&["a", "b"], 0);
+        q.shuffle = true;
+        q.looping = Loop::All;
+        for want in ["b", "a", "b", "a"] {
+            assert_eq!(id(q.next()), Some(want));
+        }
+    }
+
+    #[test]
     fn loop_cycles() {
         assert_eq!(Loop::Off.cycle(), Loop::All);
         assert_eq!(Loop::All.cycle(), Loop::One);
