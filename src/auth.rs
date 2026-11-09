@@ -35,7 +35,10 @@ pub fn logout() -> Result<()> {
 /// Env vars win; otherwise Google's downloaded `client_secret.json` in the config dir.
 /// The secret is optional (PKCE covers public clients), but Google Desktop clients still require it.
 fn creds() -> Result<(String, Option<String>)> {
-    if let Ok(i) = std::env::var("TERMUSIC_CLIENT_ID") {
+    if let Some(i) = std::env::var("TERMUSIC_CLIENT_ID")
+        .ok()
+        .filter(|i| !i.is_empty())
+    {
         return Ok((i, std::env::var("TERMUSIC_CLIENT_SECRET").ok()));
     }
     let p = token_path()
@@ -47,10 +50,16 @@ fn creds() -> Result<(String, Option<String>)> {
             p.display()
         )
     })?)?;
-    let c = &v["installed"];
-    let s = |k: &str| c[k].as_str().map(str::to_owned);
+    creds_from_json(&v)
+}
+
+/// `(client_id, client_secret)` from Google's downloaded client JSON (`installed` section).
+fn creds_from_json(v: &Value) -> Result<(String, Option<String>)> {
+    let s = |k: &str| v["installed"][k].as_str().map(str::to_owned);
     Ok((
-        s("client_id").context("bad client_secret.json: no installed.client_id")?,
+        s("client_id")
+            .filter(|i| !i.is_empty())
+            .context("bad client_secret.json: no installed.client_id")?,
         s("client_secret"),
     ))
 }
@@ -59,6 +68,12 @@ fn random_bytes<const N: usize>() -> Result<[u8; N]> {
     let mut b = [0u8; N];
     std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom")?, &mut b)?; // unix-only, like the player
     Ok(b)
+}
+
+/// PKCE code_verifier: 32 random bytes as base64url-no-pad (43 chars, RFC 7636 §4.1).
+fn pkce_verifier() -> Result<String> {
+    use base64::Engine;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes::<32>()?))
 }
 
 /// PKCE S256 (RFC 7636): base64url-no-pad of the verifier's SHA-256.
@@ -93,7 +108,7 @@ fn token_form<'a>(
 ) -> Vec<(&'a str, &'a str)> {
     let mut f = fields.to_vec();
     f.push(("client_id", id));
-    if let Some(s) = secret {
+    if let Some(s) = secret.filter(|s| !s.is_empty()) {
         f.push(("client_secret", s));
     }
     f
@@ -162,7 +177,6 @@ fn code_from_request(req: &str, state: &str) -> Result<Option<String>> {
 /// Loopback-redirect flow (Desktop-app clients). `on_url` receives the page to open;
 /// we also try to open it in the browser. Uses PKCE (S256), so a public client needs no secret.
 pub async fn login(on_url: impl Fn(&str)) -> Result<()> {
-    use base64::Engine;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (id, secret) = creds()?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -171,7 +185,7 @@ pub async fn login(on_url: impl Fn(&str)) -> Result<()> {
         .iter()
         .map(|x| format!("{x:02x}"))
         .collect();
-    let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes::<32>()?);
+    let verifier = pkce_verifier()?;
     let url = auth_url(&id, &redirect, &state, &code_challenge(&verifier))?;
     on_url(url.as_str());
     let _ = std::process::Command::new(if cfg!(target_os = "macos") {
@@ -300,5 +314,28 @@ mod tests {
         assert_eq!(f, [("grant_type", "x"), ("client_id", "id")]);
         let f = token_form(&[("grant_type", "x")], "id", Some("s"));
         assert_eq!(f.last(), Some(&("client_secret", "s")));
+        // An empty secret (e.g. TERMUSIC_CLIENT_SECRET="") counts as absent.
+        assert_eq!(token_form(&[], "id", Some("")), [("client_id", "id")]);
+    }
+
+    #[test]
+    fn verifier_is_rfc7636_shaped() {
+        let (a, b) = (pkce_verifier().unwrap(), pkce_verifier().unwrap());
+        assert_eq!(a.len(), 43);
+        assert!(
+            a.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        );
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn client_json_secret_optional() {
+        let j = serde_json::json!({"installed": {"client_id": "i", "client_secret": "s"}});
+        assert_eq!(creds_from_json(&j).unwrap(), ("i".into(), Some("s".into())));
+        let j = serde_json::json!({"installed": {"client_id": "i"}});
+        assert_eq!(creds_from_json(&j).unwrap(), ("i".into(), None));
+        assert!(creds_from_json(&serde_json::json!({"web": {"client_id": "i"}})).is_err());
+        assert!(creds_from_json(&serde_json::json!({"installed": {"client_id": ""}})).is_err());
     }
 }
