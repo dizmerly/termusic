@@ -183,6 +183,8 @@ impl App {
             Screen::Offline
         };
         let (tx, rx) = unbounded_channel();
+        let mut player = Player::new(settings.volume);
+        player.meters = settings.animations;
         Self {
             history: history_path
                 .as_deref()
@@ -192,7 +194,7 @@ impl App {
             confirm_clear: false,
             playing_id: None,
             resume_at: 0,
-            player: Player::new(settings.volume),
+            player,
             settings,
             setting_row: 0,
             help_scroll: 0,
@@ -237,6 +239,7 @@ impl App {
     /// Turn animations on or off (Settings today, the control socket later) and save the choice.
     pub fn set_animations(&mut self, on: bool) {
         self.settings.animations = on;
+        self.player.meters = on;
         self.save_settings();
     }
 
@@ -381,7 +384,8 @@ impl App {
         if p.now_playing.is_none() {
             self.anim.shown = None; // the deck is empty: the next tape has nothing to eject
         }
-        self.anim.advance(Instant::now(), p.playing, count);
+        let levels = p.levels().filter(|_| p.playing);
+        self.anim.advance(Instant::now(), p.playing, count, levels);
     }
 
     /// Keep the background preload matching the queue: drop a stale one, start one near the end.

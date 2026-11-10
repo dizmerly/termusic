@@ -6,6 +6,7 @@ use std::{
     os::unix::net::UnixStream,
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex, MutexGuard, Weak},
     time::{Duration, Instant},
 };
 
@@ -15,6 +16,15 @@ pub const PRELOAD_SECS: f64 = 20.0;
 pub const CROSSFADE_SECS: f64 = 4.0;
 /// How often a fade step is sent over IPC.
 const FADE_STEP: Duration = Duration::from_millis(200);
+/// Audio filter on every music mpv: per-channel RMS and peak (dB), read as `af-metadata/lvl`.
+const LEVEL_FILTER: &str = "--af=@lvl:lavfi=[astats=metadata=1:reset=1:measure_overall=none:measure_perchannel=RMS_level+Peak_level]";
+/// How often the meter thread reads the levels.
+const LEVEL_EVERY: Duration = Duration::from_millis(100);
+
+/// Shared with the meter thread: the socket to read (`None` = idle) and the latest
+/// (left, right) RMS in dB. Never held across an IPC round trip.
+type MeterState = (Option<PathBuf>, Option<(f32, f32)>);
+type Meter = Mutex<MeterState>;
 
 #[derive(Debug)]
 pub struct Player {
@@ -36,6 +46,10 @@ pub struct Player {
     spawned: u32,
     /// The mpv binary; tests point it at a stand-in.
     pub mpv: String,
+    /// Read level meters while a track plays (the animations setting).
+    pub meters: bool,
+    meter: Arc<Meter>,
+    meter_thread: bool,
 }
 
 /// An in-progress crossfade between `current` and `next`.
@@ -92,13 +106,18 @@ fn mpv_command(
     paused: bool,
 ) -> Command {
     let mut c = Command::new(program);
-    c.args(["--no-video", "--no-terminal", "--ytdl-format=bestaudio"])
-        .args(paused.then_some("--pause=yes"))
-        .arg(format!("--volume={volume}"))
-        .arg(format!("--input-ipc-server={}", sock.display()))
-        .args(loop_file.then_some("--loop-file=inf"))
-        .args((start > 0).then(|| format!("--start={start}")))
-        .arg(url);
+    c.args([
+        "--no-video",
+        "--no-terminal",
+        "--ytdl-format=bestaudio",
+        LEVEL_FILTER,
+    ])
+    .args(paused.then_some("--pause=yes"))
+    .arg(format!("--volume={volume}"))
+    .arg(format!("--input-ipc-server={}", sock.display()))
+    .args(loop_file.then_some("--loop-file=inf"))
+    .args((start > 0).then(|| format!("--start={start}")))
+    .arg(url);
     c
 }
 
@@ -165,6 +184,9 @@ impl Player {
             fade: None,
             spawned: 0,
             mpv: "mpv".into(),
+            meters: false,
+            meter: Arc::default(),
+            meter_thread: false,
         }
     }
 
@@ -320,9 +342,35 @@ impl Player {
         Ok(())
     }
 
+    /// Latest (left, right) RMS level in dB of the playing track; `None` when there is none.
+    pub fn levels(&self) -> Option<(f32, f32)> {
+        lock(&self.meter).1
+    }
+
+    /// Point the meter thread at the current track while it plays (started on first use).
+    fn sync_meter(&mut self) {
+        let want = self
+            .current
+            .as_ref()
+            .filter(|_| self.meters && self.playing)
+            .map(|r| r.sock.clone());
+        let on = want.is_some();
+        let mut m = lock(&self.meter);
+        if m.0 != want {
+            *m = (want, None);
+        }
+        drop(m);
+        if on && !self.meter_thread {
+            self.meter_thread = true;
+            let w = Arc::downgrade(&self.meter);
+            std::thread::spawn(move || meter_loop(w));
+        }
+    }
+
     /// Follow mpv's pause state: the `playing` flag, the preload and a running fade stay in step.
     fn sync_pause(&mut self, paused: bool) {
         self.playing = !paused;
+        self.sync_meter();
         if let (Some(f), Some(n)) = (self.fade.as_mut(), &self.next) {
             let _ = ipc_to(&n.sock, &pause_json(paused));
             match f.paused_at.take() {
@@ -359,6 +407,7 @@ impl Player {
     /// `Some(false)` for an immediate exit (mpv/yt-dlp failure) so the caller doesn't skip through the list.
     /// After `Some(true)` the caller starts the next track, which promotes the preload if there is one.
     pub fn tick(&mut self) -> Option<bool> {
+        self.sync_meter();
         if let Some(n) = self.next.as_mut()
             && n.mpv.try_wait().ok().flatten().is_some()
         {
@@ -504,6 +553,62 @@ fn poll(sock: &std::path::Path) -> (Option<f64>, Option<f64>, Option<bool>) {
     }
     let paused = reply(&lines, 3).and_then(|v| v["data"].as_bool());
     (parse_reply(&lines, 1), parse_reply(&lines, 2), paused)
+}
+
+fn lock(m: &Meter) -> MutexGuard<'_, MeterState> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The meter thread: reads the levels of the socket `Player` points it at, about 10 times a
+/// second, until the `Player` is gone. A failed read clears them.
+fn meter_loop(meter: Weak<Meter>) {
+    while let Some(m) = meter.upgrade() {
+        let sock = lock(&m).0.clone();
+        let levels = sock.as_deref().and_then(read_levels);
+        {
+            let mut g = lock(&m);
+            if g.0 == sock {
+                g.1 = levels; // not if the target moved meanwhile (pause, promote)
+            }
+        }
+        drop(m); // a dropped Player ends the loop
+        std::thread::sleep(LEVEL_EVERY);
+    }
+}
+
+/// One `af-metadata/lvl` round trip with short timeouts.
+fn read_levels(sock: &std::path::Path) -> Option<(f32, f32)> {
+    let t = Duration::from_millis(50);
+    let mut s = UnixStream::connect(sock).ok()?;
+    s.set_read_timeout(Some(t)).ok()?;
+    s.set_write_timeout(Some(t)).ok()?;
+    s.write_all(b"{\"command\":[\"get_property\",\"af-metadata/lvl\"],\"request_id\":1}\n")
+        .ok()?;
+    let mut lines = Vec::new();
+    for l in BufReader::new(s).lines().take(8) {
+        let Ok(l) = l else { break };
+        let done = l.contains("\"request_id\":1");
+        lines.push(l);
+        if done {
+            break;
+        }
+    }
+    parse_levels(&lines)
+}
+
+/// (left, right) RMS dB from the `af-metadata/lvl` reply (request 1); mono gives (l, l).
+/// mpv sends the values as strings; `-inf` is silence.
+fn parse_levels<S: AsRef<str>>(lines: &[S]) -> Option<(f32, f32)> {
+    let v = reply(lines, 1)?;
+    let ch = |n: u8| {
+        v["data"][format!("lavfi.astats.{n}.RMS_level")]
+            .as_str()?
+            .parse::<f32>()
+            .ok()
+            .filter(|x| !x.is_nan())
+    };
+    let l = ch(1)?;
+    Some((l, ch(2).unwrap_or(l)))
 }
 
 /// The numeric `data` of the reply with `request_id == id`; events and errors give `None`.
@@ -992,6 +1097,82 @@ mod tests {
     }
 
     #[test]
+    fn level_parsing() {
+        let r = |data: &str| {
+            [format!(
+                r#"{{"data":{data},"request_id":1,"error":"success"}}"#
+            )]
+        };
+        let real = r#"{"lavfi.astats.1.Peak_level": "-18.06", "lavfi.astats.1.RMS_level": "-21.02", "lavfi.astats.2.Peak_level": "-17.5", "lavfi.astats.2.RMS_level": "-20.5"}"#;
+        assert_eq!(parse_levels(&r(real)), Some((-21.02, -20.5)));
+        let mono =
+            r#"{"lavfi.astats.1.Peak_level": "-18.06", "lavfi.astats.1.RMS_level": "-21.02"}"#;
+        assert_eq!(parse_levels(&r(mono)), Some((-21.02, -21.02)));
+        let silent = r#"{"lavfi.astats.1.RMS_level": "-inf", "lavfi.astats.2.RMS_level": "-inf"}"#;
+        assert_eq!(
+            parse_levels(&r(silent)),
+            Some((f32::NEG_INFINITY, f32::NEG_INFINITY))
+        );
+        assert_eq!(
+            parse_levels(&r(r#"{"lavfi.astats.1.Peak_level": "-3"}"#)),
+            None
+        ); // no RMS
+        assert_eq!(parse_levels(&r("{}")), None);
+        assert_eq!(parse_levels(&r("1.0")), None); // not an object
+        assert_eq!(
+            parse_levels(&r(r#"{"lavfi.astats.1.RMS_level": "loud"}"#)),
+            None
+        );
+        assert_eq!(
+            parse_levels(&r(r#"{"lavfi.astats.1.RMS_level": "nan"}"#)),
+            None
+        );
+        assert_eq!(
+            parse_levels(&[r#"{"request_id":1,"error":"error accessing property"}"#]),
+            None
+        );
+        assert_eq!(parse_levels(&["garbage"]), None);
+        assert_eq!(parse_levels::<&str>(&[]), None);
+    }
+
+    #[test]
+    fn meter_thread_reads_the_playing_track_and_idles_otherwise() {
+        let p = std::env::temp_dir().join(format!("termusic-lvl-{}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let l = std::os::unix::net::UnixListener::bind(&p).unwrap();
+        let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = served.clone();
+        std::thread::spawn(move || {
+            for mut s in l.incoming().map_while(Result::ok) {
+                let mut line = String::new();
+                let _ = BufReader::new(&s).read_line(&mut line);
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = s.write_all(b"{\"event\":\"x\"}\n{\"data\":{\"lavfi.astats.1.RMS_level\":\"-9.5\"},\"request_id\":1,\"error\":\"success\"}\n");
+            }
+        });
+        let mut pl = Player::new(80);
+        pl.set_current(wrap(sleeper("60"), p.clone(), "c", "c").unwrap());
+        pl.tick(); // meters off (the default): no thread, no reads
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!pl.meter_thread && pl.levels().is_none());
+        pl.meters = true;
+        pl.tick();
+        assert!(wait_until(|| pl.levels() == Some((-9.5, -9.5))));
+        pl.sync_pause(true); // paused: idle and empty at once
+        assert!(pl.levels().is_none());
+        let n = served.load(std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(350));
+        assert!(served.load(std::sync::atomic::Ordering::SeqCst) <= n + 1); // one read in flight at most
+        assert!(pl.levels().is_none());
+        let weak = Arc::downgrade(&pl.meter);
+        pl.stop();
+        drop(pl);
+        assert!(wait_until(|| weak.upgrade().is_none())); // the thread let go
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
     fn reply_parsing() {
         let lines = [
             r#"{"event":"playback-restart"}"#,
@@ -1040,6 +1221,7 @@ mod tests {
         let pre = args(&mpv_command("mpv", "u", s, false, 0, 0, true));
         assert!(pre.contains(&"--pause=yes".into()) && pre.contains(&"--volume=0".into()));
         assert!(m.contains(&"--input-ipc-server=/tmp/x.sock".into()));
+        assert!(m.contains(&LEVEL_FILTER.into()) && pre.contains(&LEVEL_FILTER.into()));
         assert_eq!(m.last().unwrap(), "u");
     }
 

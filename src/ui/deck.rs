@@ -1,7 +1,7 @@
 //! The deck pane: cassette, tape counter and transport keys. The drawing functions are
 //! pure (shell and plain values in, lines out) so they test without a terminal.
 use super::{clean, fit, pad, wrap};
-use crate::anim::{Key, Phase};
+use crate::anim::{Key, Phase, SEGMENTS};
 use crate::app::{App, Screen};
 use crate::commands;
 use crate::queue::Loop;
@@ -227,6 +227,29 @@ pub fn counter_row(
     Line::from(spans)
 }
 
+/// `L ▮▮▮▮▮▮▮▮▯▯▯▯▯▯  R ▮▮▮▮▮▮▯▯▯▯▯▯▯▯`, 34 columns: (lit, peak) segments per channel; the
+/// peak segment is lit alone above the level. `None`: both meters unlit.
+pub fn meter_row(s: &Shell, m: Option<[(usize, usize); 2]>) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (ch, name) in ["L ", "R "].into_iter().enumerate() {
+        if ch == 1 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(name, fg(s.dim)));
+        let (lit, peak) = m.map_or((0, 0), |m| m[ch]);
+        for i in 0..SEGMENTS {
+            let on = i < lit || i + 1 == peak;
+            let color = match (on, i >= SEGMENTS - 3) {
+                (false, _) => s.dim,
+                (true, true) => s.meter_hi,
+                (true, false) => s.meter_lo,
+            };
+            spans.push(Span::styled(if on { "▮" } else { "▯" }, fg(color)));
+        }
+    }
+    Line::from(spans)
+}
+
 /// Six 5 x 3 transport key caps in 4 rows of 30 columns: prev, play, pause, next, shuffle,
 /// loop. An up cap sits in rows 1-3 over a shadow; a down cap (latched by its state, or
 /// `pressed` for a moment) sits in rows 2-4, lit.
@@ -334,7 +357,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
     lines.push(counter_row(
         s, p.position, p.duration, v.loaded, CASSETTE_W, dim,
     ));
-    lines.push(Line::raw("")); // level meters (milestone 2)
+    // Animations off: no meters, the row stays blank.
+    lines.push(anim.map_or(Line::raw(""), |a| meter_row(s, a.meters())));
     lines.extend(key_caps(
         s,
         v.loaded,
@@ -646,6 +670,29 @@ mod tests {
         assert_eq!(all(&l), [false, false, true, false, true, false]);
         let l = key_caps(s, false, true, false, Loop::Off, Some(Key::Prev)); // nothing loaded
         assert_eq!(all(&l), [true, false, false, false, false, false]);
+    }
+
+    #[test]
+    fn meter_row_lights_levels_peaks_and_the_red_top() {
+        let s = &TPS_L2;
+        let r = meter_row(s, Some([(8, 8), (6, 12)]));
+        assert_eq!(r.width(), CASSETTE_W);
+        assert_eq!(text(&r), "L ▮▮▮▮▮▮▮▮▯▯▯▯▯▯  R ▮▮▮▮▮▮▯▯▯▯▯▮▯▯");
+        let fgs: Vec<_> = r
+            .spans
+            .iter()
+            .filter(|sp| sp.content == "▮" || sp.content == "▯")
+            .map(|sp| sp.style.fg.unwrap())
+            .collect();
+        assert_eq!(fgs[0], s.meter_lo);
+        assert_eq!(fgs[8], s.dim); // unlit
+        assert_eq!(fgs[14 + 11], s.meter_hi); // the right peak, in the top three
+        assert_eq!(fgs[14 + 10], s.dim);
+        let full = text(&meter_row(s, Some([(14, 14), (14, 14)])));
+        assert_eq!(full.matches('▮').count(), 28);
+        let empty = text(&meter_row(s, None));
+        assert_eq!(empty, "L ▯▯▯▯▯▯▯▯▯▯▯▯▯▯  R ▯▯▯▯▯▯▯▯▯▯▯▯▯▯");
+        assert_eq!(text(&meter_row(s, Some([(0, 0), (0, 0)]))), empty);
     }
 
     #[test]

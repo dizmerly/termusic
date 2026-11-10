@@ -17,6 +17,29 @@ const EJECT_MS: u64 = 200;
 /// Label rows slide one row per this many ms.
 const ROW_MS: u64 = 40;
 
+/// Segments per level meter.
+pub const SEGMENTS: usize = 14;
+/// RMS level (dB) of an empty meter; 0 dB fills it.
+const FLOOR_DB: f32 = -42.0;
+/// The peak segment stays this long, then falls one segment per `FALL_MS`.
+const HOLD_MS: u64 = 500;
+const FALL_MS: u64 = 100;
+
+/// Lit segments for an RMS level in dB, linear from `FLOOR_DB` (0) to 0 dB (`SEGMENTS`).
+pub fn segments(db: f32) -> usize {
+    let x = ((db - FLOOR_DB) / -FLOOR_DB * SEGMENTS as f32).round();
+    if x.is_nan() {
+        0
+    } else {
+        x.clamp(0.0, SEGMENTS as f32) as usize
+    }
+}
+
+/// Where a peak reached `ms` ago is drawn now: held, then falling.
+pub fn peak_fall(peak: usize, ms: u64) -> usize {
+    peak.saturating_sub((ms.saturating_sub(HOLD_MS) / FALL_MS) as usize)
+}
+
 /// The transport key caps, left to right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
@@ -82,6 +105,10 @@ pub struct Anim {
     /// Counter value at the last `advance`, and when each digit last changed.
     count: u64,
     changed: [Option<Instant>; 3],
+    /// Latest (left, right) RMS dB; `None` when nothing plays or there is no data.
+    pub levels: Option<(f32, f32)>,
+    /// Peak segment per channel and when it was reached.
+    peaks: [(usize, Instant); 2],
 }
 
 impl Anim {
@@ -97,6 +124,8 @@ impl Anim {
             frame: 0,
             count: 0,
             changed: [None; 3],
+            levels: None,
+            peaks: [(0, now); 2],
         }
     }
 
@@ -146,8 +175,20 @@ impl Anim {
         }
     }
 
-    /// Move to `now`: spin the hubs if the tape moves and note which counter digits changed.
-    pub fn advance(&mut self, now: Instant, playing: bool, count: u64) {
+    fn peak(&self, ch: usize) -> usize {
+        let (p, t) = self.peaks[ch];
+        peak_fall(p, self.since(t).as_millis() as u64)
+    }
+
+    /// (lit segments, peak segment) per channel; `None` draws both meters unlit.
+    pub fn meters(&self) -> Option<[(usize, usize); 2]> {
+        let (l, r) = self.levels?;
+        Some([(segments(l), self.peak(0)), (segments(r), self.peak(1))])
+    }
+
+    /// Move to `now`: spin the hubs if the tape moves, note which counter digits changed and
+    /// take the new `levels`, raising a peak they reach.
+    pub fn advance(&mut self, now: Instant, playing: bool, count: u64, levels: Option<(f32, f32)>) {
         self.now = now;
         let frame =
             (now.saturating_duration_since(self.start).as_millis() / FRAME.as_millis()) as u64;
@@ -163,6 +204,18 @@ impl Anim {
             }
         }
         self.count = count;
+        self.levels = levels;
+        match levels {
+            Some((l, r)) => {
+                for (ch, db) in [l, r].into_iter().enumerate() {
+                    let seg = segments(db);
+                    if seg >= self.peak(ch) {
+                        self.peaks[ch] = (seg, now);
+                    }
+                }
+            }
+            None => self.peaks = [(0, now); 2],
+        }
     }
 
     /// Which counter digits are between numbers (drawn dim).
@@ -195,20 +248,56 @@ mod tests {
     fn hubs_turn_while_playing_and_hold_when_paused() {
         let t0 = Instant::now();
         let mut a = Anim::new(t0);
-        a.advance(t0 + ms(300), true, 0); // 6 frames
+        a.advance(t0 + ms(300), true, 0, None); // 6 frames
         assert_eq!(a.reel, 2);
-        a.advance(t0 + ms(900), false, 0); // paused: holds
+        a.advance(t0 + ms(900), false, 0, None); // paused: holds
         assert_eq!(a.reel, 2);
-        a.advance(t0 + ms(1050), true, 0); // resumes from the held glyph, no jump
+        a.advance(t0 + ms(1050), true, 0, None); // resumes from the held glyph, no jump
         assert_eq!(a.reel, 3);
         a.whirr = Some(t0 + ms(1050));
-        a.advance(t0 + ms(1250), true, 0); // whirr: a step per frame
+        a.advance(t0 + ms(1250), true, 0, None); // whirr: a step per frame
         assert_eq!(a.reel, 7);
-        a.advance(t0 + ms(1400), false, 0); // still whirring at 350 ms, even paused
+        a.advance(t0 + ms(1400), false, 0, None); // still whirring at 350 ms, even paused
         assert_eq!(a.reel, 10);
-        a.advance(t0 + ms(2000), false, 0);
+        a.advance(t0 + ms(2000), false, 0, None);
         assert_eq!(a.reel, 10);
         assert!(!a.busy());
+    }
+
+    #[test]
+    fn meter_scale_is_linear_and_clamped() {
+        assert_eq!(segments(-42.0), 0);
+        assert_eq!(segments(-60.0), 0);
+        assert_eq!(segments(f32::NEG_INFINITY), 0); // digital silence
+        assert_eq!(segments(f32::NAN), 0);
+        assert_eq!(segments(-21.0), 7);
+        assert_eq!(segments(-3.0), 13);
+        assert_eq!(segments(0.0), SEGMENTS);
+        assert_eq!(segments(6.0), SEGMENTS);
+    }
+
+    #[test]
+    fn peaks_hold_500_ms_then_fall_a_segment_per_100_ms() {
+        assert_eq!(peak_fall(10, 0), 10);
+        assert_eq!(peak_fall(10, 599), 10);
+        assert_eq!(peak_fall(10, 600), 9);
+        assert_eq!(peak_fall(10, 1000), 5);
+        assert_eq!(peak_fall(2, 5000), 0);
+        let t0 = Instant::now();
+        let mut a = Anim::new(t0);
+        assert_eq!(a.meters(), None);
+        a.advance(t0, true, 0, Some((-6.0, -21.0))); // 12 and 7 segments
+        assert_eq!(a.meters(), Some([(12, 12), (7, 7)]));
+        a.advance(t0 + ms(300), true, 0, Some((-30.0, -21.0))); // left drops: peak held
+        assert_eq!(a.meters(), Some([(4, 12), (7, 7)]));
+        a.advance(t0 + ms(800), true, 0, Some((-30.0, -12.0))); // right rises: new peak
+        assert_eq!(a.meters(), Some([(4, 9), (10, 10)]));
+        a.advance(t0 + ms(2000), true, 0, Some((-30.0, -12.0))); // fallen to the level
+        assert_eq!(a.meters(), Some([(4, 4), (10, 10)]));
+        a.advance(t0 + ms(2100), false, 0, None); // paused: empty, peaks gone
+        assert_eq!(a.meters(), None);
+        a.advance(t0 + ms(2150), true, 0, Some((-42.0, -42.0)));
+        assert_eq!(a.meters(), Some([(0, 0), (0, 0)]));
     }
 
     #[test]
@@ -269,15 +358,15 @@ mod tests {
         let t0 = Instant::now();
         let mut a = Anim::new(t0);
         assert_eq!(a.dim_digits(), [false; 3]);
-        a.advance(t0 + ms(1000), true, 9);
+        a.advance(t0 + ms(1000), true, 9, None);
         assert_eq!(a.dim_digits(), [false, false, true]);
-        a.advance(t0 + ms(1050), true, 9);
+        a.advance(t0 + ms(1050), true, 9, None);
         assert_eq!(a.dim_digits(), [false, false, true]);
-        a.advance(t0 + ms(1100), true, 9);
+        a.advance(t0 + ms(1100), true, 9, None);
         assert_eq!(a.dim_digits(), [false; 3]);
-        a.advance(t0 + ms(2000), true, 10); // 009 -> 010: two digits roll
+        a.advance(t0 + ms(2000), true, 10, None); // 009 -> 010: two digits roll
         assert_eq!(a.dim_digits(), [false, true, true]);
-        a.advance(t0 + ms(3000), true, 0); // 010 -> 000 (counter wraps / track ends)
+        a.advance(t0 + ms(3000), true, 0, None); // 010 -> 000 (counter wraps / track ends)
         assert_eq!(a.dim_digits(), [false, true, false]);
     }
 }

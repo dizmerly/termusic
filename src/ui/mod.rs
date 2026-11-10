@@ -932,6 +932,22 @@ mod tests {
         }
         let mut a = playing();
         a.status.clear();
+        let t = a.anim.now;
+        a.anim.advance(t, true, 72, Some((-4.0, -9.0))); // a loud moment: the peaks
+        a.anim.advance(
+            t + std::time::Duration::from_millis(300),
+            true,
+            72,
+            Some((-15.0, -18.0)),
+        );
+        show(
+            "Deck, playing, meters L -15 dB R -18 dB, peaks held",
+            &mut a,
+            80,
+            24,
+        );
+        let mut a = playing();
+        a.status.clear();
         a.anim.pressed = Some((crate::anim::Key::Next, a.anim.now));
         show("Deck, n held down (momentary press)", &mut a, 80, 24);
         for (ms, name) in [
