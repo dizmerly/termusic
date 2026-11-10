@@ -15,6 +15,7 @@ use ratatui::{
 pub fn draw(f: &mut Frame, app: &mut App) {
     let s = app.shell();
     let show_next = app.screen != Screen::Help
+        && app.screen != Screen::Queue
         && f.area().height >= 12
         && app.queue.upcoming().next().is_some();
     let [logo, body, next, bar] = Layout::vertical([
@@ -65,6 +66,28 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             "Offline",
             s.accent,
         ),
+        _ if app.searching => {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("{} ", theme::ICON_NOTE), fg(s.frame)),
+                    Span::styled(app.input.clone(), fg(s.label)),
+                    Span::styled("▏", fg(s.frame)),
+                ]))
+                .block(theme::panel(
+                    "Search · Enter run · Esc/Tab: back to the list",
+                    s.meter_lo,
+                )),
+                body,
+            );
+            // Below the input row, inside the panel border.
+            let art = Rect::new(
+                body.x + 1,
+                body.y + 2,
+                body.width.saturating_sub(2),
+                body.height.saturating_sub(3),
+            );
+            draw_cassette(f, app, art);
+        }
         Screen::Login => {
             let lines = match &app.login_url {
                 Some(url) => vec![
@@ -89,32 +112,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             };
             msg(f, lines, "Login", s.meter_lo)
         }
-        Screen::Search => {
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(format!("{} ", theme::ICON_NOTE), fg(s.frame)),
-                    Span::styled(app.input.clone(), fg(s.label)),
-                    Span::styled("▏", fg(s.frame)),
-                ]))
-                .block(theme::panel(
-                    if app.results.is_empty() {
-                        "Search · Enter run · Esc: quit"
-                    } else {
-                        "Search · Enter run · Esc/Tab: back to results"
-                    },
-                    s.meter_lo,
-                )),
-                body,
-            );
-            // Below the input row, inside the panel border.
-            let art = Rect::new(
-                body.x + 1,
-                body.y + 2,
-                body.width.saturating_sub(2),
-                body.height.saturating_sub(3),
-            );
-            draw_cassette(f, app, art);
-        }
         Screen::Help => draw_help(f, app, body),
         Screen::Settings => draw_settings(f, app, body),
         Screen::History => {
@@ -131,6 +128,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let body = cassette_above(f, app, body);
             draw_list(f, app, &rows, &title, s.dim, body);
             app.results = rows;
+        }
+        Screen::Queue => {
+            let rows: Vec<Track> = app
+                .queue
+                .current()
+                .into_iter()
+                .chain(app.queue.upcoming())
+                .cloned()
+                .collect();
+            draw_list(f, app, &rows, "Queue · Enter jumps to it", s.meter_lo, body);
         }
         Screen::Playlists => {
             let rows = std::mem::take(&mut app.playlists);
@@ -282,7 +289,7 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
     }
     // Right side: progress (only with a known length and room) then the help hint.
     // On Search the letters are text, so it shows the F-keys.
-    let search = app.screen == Screen::Search;
+    let search = app.searching;
     let hint = match (area.width >= 70 && app.status.is_empty(), search) {
         (true, true) => "F3 settings · F4 history · F1 help ",
         (true, false) => "S settings · H history · ? help ",
@@ -404,27 +411,32 @@ const GROUPS: [(&str, &[&str]); 4] = [
 ];
 
 /// Navigation and screen keys that are not commands.
-const NAV_KEYS: [(&str, &str); 10] = [
+const NAV_KEYS: [(&str, &str); 12] = [
     ("j/k ↓/↑", "move down / up in a list (scroll in Help)"),
     ("PgDn/Up", "move one page in a list"),
     ("g / G", "jump to the first / last row"),
-    ("Enter", "run the search, or play the highlighted row"),
+    (
+        "Enter",
+        "run the search, play the highlighted row, or jump to it in Queue",
+    ),
     (
         "Esc",
-        "go back: Search to results, overlays to prior screen",
+        "leave the search field, close an overlay; in a list: search",
     ),
-    ("Tab", "on Search: back to the results list"),
+    ("Tab", "next tab; in the search field: back to the list"),
+    ("Shift-Tab", "previous tab"),
+    ("1-4", "Results, Queue, Lists, History tab"),
     ("F1", "help (same as ?)"),
-    ("F2", "playlists, also while typing a search"),
+    ("F2", "Lists tab (same as P), also while typing a search"),
     ("F3", "settings (same as S), also while typing a search"),
-    ("F4", "history (same as H), also while typing a search"),
+    ("F4", "History tab (same as H), also while typing a search"),
 ];
 
 fn help_lines(s: &Shell) -> Vec<Line<'static>> {
     let head = |t: &str| Line::styled(t.to_owned(), fg(s.label).bold());
     let key = |k: String, d: String| {
         Line::from(vec![
-            Span::styled(format!("{k:>8}  "), theme::title(s)),
+            Span::styled(format!("{k:>9}  "), theme::title(s)),
             Span::styled(d, fg(s.meter_lo)),
         ])
     };
@@ -531,6 +543,13 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
 
+    /// A blank app with focus on the list (startup focuses the search field).
+    fn blank() -> App {
+        let mut a = App::blank();
+        a.searching = false;
+        a
+    }
+
     fn render(app: &mut App, w: u16, h: u16) -> String {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
         t.draw(|f| draw(f, app)).unwrap();
@@ -564,20 +583,20 @@ mod tests {
         let w = a[0].width();
         assert!(a.iter().all(|l| l.width() == w));
 
-        let mut app = App::blank();
-        app.screen = Screen::Search;
+        let mut app = blank();
+        (app.screen, app.searching) = (Screen::Results, true);
         assert!(render(&mut app, 80, 30).contains("[_____]"));
         for (w, h) in [(80, 8), (20, 30), (1, 1), (80, 3)] {
             assert!(!render(&mut app, w, h).contains("[_____]"), "{w}x{h}");
         }
-        app.screen = Screen::Results;
+        app.searching = false;
         assert!(render(&mut app, 80, 40).contains("[_____]"));
         assert!(!render(&mut app, 80, 20).contains("[_____]"));
     }
 
     #[test]
     fn help_fits_80x24() {
-        let mut a = App::blank();
+        let mut a = blank();
         a.screen = Screen::Help;
         let s = render(&mut a, 80, 24);
         assert!(s.contains("closes this screen"), "help clipped");
@@ -593,7 +612,7 @@ mod tests {
 
     #[test]
     fn help_lists_every_command_and_key_when_scrolled() {
-        let mut a = App::blank();
+        let mut a = blank();
         a.screen = Screen::Help;
         let mut all = String::new();
         for scroll in [0, 8, 16, 24, u16::MAX] {
@@ -608,7 +627,17 @@ mod tests {
             assert!(all.contains(g), "{g}");
         }
         for k in [
-            "Esc", "Tab", "F1", "F2", "F3", "F4", "PgDn/Up", "g / G", "Enter",
+            "Esc",
+            "Tab",
+            "Shift-Tab",
+            "1-4",
+            "F1",
+            "F2",
+            "F3",
+            "F4",
+            "PgDn/Up",
+            "g / G",
+            "Enter",
         ] {
             assert!(all.contains(k), "{k}");
         }
@@ -617,25 +646,19 @@ mod tests {
 
     #[test]
     fn search_and_results_hints() {
-        let mut a = App::blank();
-        a.screen = Screen::Search;
-        assert!(render(&mut a, 80, 24).contains("Esc: quit"));
-        a.results = vec![Track {
-            title: "t".into(),
-            channel: String::new(),
-            id: "i".into(),
-        }];
-        assert!(render(&mut a, 80, 24).contains("Esc/Tab: back to results"));
-        a.screen = Screen::Results;
+        let mut a = blank();
+        (a.screen, a.searching) = (Screen::Results, true);
+        assert!(render(&mut a, 80, 24).contains("Esc/Tab: back to the list"));
+        a.searching = false;
         let s = render(&mut a, 80, 24);
         assert!(s.contains("/ or Esc: search") && s.contains("S settings · H history"));
-        a.screen = Screen::Search; // letters are text there: the hint names the F-keys
+        a.searching = true; // letters are text there: the hint names the F-keys
         assert!(render(&mut a, 80, 24).contains("F3 settings · F4 history"));
     }
 
     #[test]
     fn settings_and_history_render() {
-        let mut a = App::blank();
+        let mut a = blank();
         a.screen = Screen::Settings;
         let s = render(&mut a, 80, 24);
         for w in [
@@ -676,7 +699,7 @@ mod tests {
 
     #[test]
     fn volume_keeps_panel_corner_and_title_clear_of_progress() {
-        let mut a = App::blank();
+        let mut a = blank();
         a.screen = Screen::Help;
         let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
         t.draw(|f| draw(f, &mut a)).unwrap();
@@ -690,7 +713,7 @@ mod tests {
 
     #[test]
     fn volume_and_progress_render() {
-        let mut a = App::blank();
+        let mut a = blank();
         a.player.volume = 80;
         a.player.position = 65.0;
         a.player.duration = Some(185.0);
@@ -706,7 +729,7 @@ mod tests {
 
     #[test]
     fn bar_shows_shuffle_and_loop_mode() {
-        let mut a = App::blank();
+        let mut a = blank();
         assert!(!render(&mut a, 80, 24).contains(theme::ICON_LOOP));
         a.queue.toggle_shuffle();
         a.queue.looping = Loop::One;
@@ -717,7 +740,7 @@ mod tests {
 
     #[test]
     fn up_next_line_shows_three_and_hides_on_help_or_short() {
-        let mut a = App::blank();
+        let mut a = blank();
         a.screen = Screen::Results;
         assert!(!render(&mut a, 80, 24).contains("next:"));
         for n in ["one", "two", "three", "four"] {
@@ -737,7 +760,7 @@ mod tests {
 
     #[test]
     fn long_titles_keep_channel_visible() {
-        let mut a = App::blank();
+        let mut a = blank();
         a.screen = Screen::Results;
         a.results = vec![Track {
             title: "x".repeat(200),
@@ -750,11 +773,11 @@ mod tests {
 
     #[test]
     fn login_hint_fully_visible_on_search() {
-        let mut a = App::blank();
-        a.screen = Screen::Search;
-        a.status = crate::app::LOGIN_HINT.into();
+        let mut a = blank();
+        (a.screen, a.searching) = (Screen::Results, true);
+        a.status = "queued: a fairly long title for the bar".into();
         let s = render(&mut a, 80, 24);
-        assert!(s.contains(crate::app::LOGIN_HINT) && s.contains("F1 help"));
+        assert!(s.contains(&a.status) && s.contains("F1 help"));
     }
 
     #[test]
@@ -768,7 +791,7 @@ mod tests {
             position_secs: 83,
         };
         assert_eq!(history_row(&e).channel, "youtu.be/abc123 01:23");
-        let mut app = App::blank();
+        let mut app = blank();
         app.screen = Screen::History;
         app.history = vec![e];
         let out = render(&mut app, 80, 24);
@@ -787,7 +810,7 @@ mod tests {
 
     #[test]
     fn list_draws_rows_and_never_panics_when_tiny() {
-        let mut app = App::blank();
+        let mut app = blank();
         app.screen = Screen::Results;
         app.results = (0..5)
             .map(|i| Track {

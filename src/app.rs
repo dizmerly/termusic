@@ -48,13 +48,12 @@ fn bg(f: impl FnOnce() + Send + 'static) {
     }
 }
 
-pub(crate) const LOGIN_HINT: &str = "Playlists need you to be logged in (P/F2: sign in)";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
+    /// The Lists tab while signed out: the sign-in prompt.
     Login,
-    Search,
     Results,
+    Queue,
     Playlists,
     Help,
     Settings,
@@ -62,10 +61,26 @@ pub enum Screen {
     Offline,
 }
 
+/// The J-card tabs, in strip order (`1`-`4`).
+pub const TABS: [Screen; 4] = [
+    Screen::Results,
+    Screen::Queue,
+    Screen::Playlists,
+    Screen::History,
+];
+
 impl Screen {
-    /// Screens opened on top of another one; Esc returns to the screen below on `App::stack`.
+    /// Screens opened on top of a tab; Esc returns to the screen below on `App::stack`.
     fn is_overlay(self) -> bool {
-        matches!(self, Self::Help | Self::Settings | Self::History)
+        matches!(self, Self::Help | Self::Settings)
+    }
+
+    /// Position in `TABS`; Login is the signed-out Lists tab.
+    pub fn tab_index(self) -> Option<usize> {
+        match self {
+            Self::Login => Some(2),
+            s => TABS.iter().position(|&t| t == s),
+        }
     }
 }
 
@@ -91,8 +106,6 @@ pub struct App {
     pub playlists: Vec<Track>,
     /// `results` is an opened playlist (keeps its order; no related lookup on play).
     from_playlist: bool,
-    /// The logged-out hint was shown; asking for playlists again opens Login.
-    login_prompted: bool,
     /// Test hook: overrides the on-disk login state.
     #[cfg(test)]
     logged_in: Option<bool>,
@@ -102,9 +115,14 @@ pub struct App {
     pub busy: bool,
     tx: UnboundedSender<Msg>,
     rx: UnboundedReceiver<Msg>,
+    /// The search field has focus (typing goes there); the tab stays what it was.
+    pub searching: bool,
+    /// Selection in the active tab's list.
     pub selected: usize,
-    /// First visible row of the results list.
+    /// First visible row of the active tab's list.
     pub offset: usize,
+    /// (selected, offset) of each tab in `TABS` while it is not active.
+    tab_sel: [(usize, usize); 4],
     /// Visible rows in the results list; updated by `ui` each frame.
     pub page: usize,
     pub player: Player,
@@ -125,8 +143,6 @@ pub struct App {
     resume_at: u64,
     /// First visible line of the help screen.
     pub help_scroll: u16,
-    /// List selection and offset to restore when an overlay closes.
-    saved_sel: (usize, usize),
 }
 
 impl App {
@@ -148,9 +164,9 @@ impl App {
     }
 
     fn with_paths(settings: Settings, history_path: Option<PathBuf>) -> Self {
-        // Login is optional (only playlists need it), so we always start at Search.
+        // Login is optional (only playlists need it), so we always start typing a search.
         let screen = if net::is_online() {
-            Screen::Search
+            Screen::Results
         } else {
             Screen::Offline
         };
@@ -168,10 +184,8 @@ impl App {
             settings,
             setting_row: 0,
             help_scroll: 0,
-            saved_sel: (0, 0),
             playlists: Vec::new(),
             from_playlist: false,
-            login_prompted: false,
             #[cfg(test)]
             logged_in: None,
             login_url: None,
@@ -182,6 +196,8 @@ impl App {
             stack: Vec::new(),
             input: String::new(),
             results: Vec::new(),
+            searching: true,
+            tab_sel: [(0, 0); 4],
             selected: 0,
             offset: 0,
             page: 10,
@@ -249,25 +265,16 @@ impl App {
         auth::is_logged_in()
     }
 
-    /// Logged out: soft-fail with a hint; asking again opens the Login screen.
+    /// The Lists tab: signed out it shows the sign-in prompt, else (re)loads the playlists.
     fn open_playlists_as(&mut self, logged_in: bool) {
         if commands::disabled(commands::playlists::KEY) {
             return;
         }
         if commands::requires_login(commands::playlists::KEY) && !logged_in {
-            if self.login_prompted {
-                self.login_prompted = false;
-                self.status.clear();
-                self.screen = Screen::Login;
-            } else {
-                self.login_prompted = true;
-                self.status = LOGIN_HINT.into();
-            }
+            self.set_tab(Screen::Login);
             return;
         }
-        self.login_prompted = false;
-        self.screen = Screen::Playlists;
-        self.select(0);
+        self.set_tab(Screen::Playlists);
         self.spawn(async { Ok(Msg::Playlists(youtube::playlists().await?)) });
     }
 
@@ -299,7 +306,7 @@ impl App {
                         String::new()
                     };
                     self.results = v;
-                    self.screen = Screen::Results;
+                    self.set_tab(Screen::Results);
                     self.select(0);
                 }
                 Msg::Related(id, v) => {
@@ -307,11 +314,13 @@ impl App {
                         self.queue
                             .set_upcoming(v.iter().filter(|t| t.id != id).cloned().collect());
                         self.results = v;
-                        self.screen = Screen::Results;
-                        self.select(0);
+                        self.set_sel(Screen::Results, 0);
                     }
                 }
-                Msg::Playlists(v) => self.playlists = v,
+                Msg::Playlists(v) => {
+                    self.playlists = v;
+                    self.set_sel(Screen::Playlists, self.sel_of(Screen::Playlists));
+                }
                 // Ignored if the user left Playlists or moved the selection while it loaded.
                 Msg::PlaylistTracks(id, v) => {
                     let current = self
@@ -353,17 +362,11 @@ impl App {
                     history::push(&mut self.history, t);
                     self.save_history();
                 }
-                if self.screen == Screen::History {
-                    self.select(0); // the playing track just moved to the top
-                }
+                // The playing track is now the top row of History and Queue.
+                self.set_sel(Screen::History, 0);
+                self.set_sel(Screen::Queue, 0);
                 if let Some(i) = self.results.iter().position(|r| r.id == id) {
-                    if !self.screen.is_overlay() {
-                        if self.screen != Screen::Playlists {
-                            self.select(i);
-                        }
-                    } else if self.stack.first() == Some(&Screen::Results) {
-                        self.saved_sel.0 = i; // the list under the overlay follows the track
-                    }
+                    self.set_sel(Screen::Results, i);
                 }
             }
             Event::TrackEnded => self.next(),
@@ -371,8 +374,16 @@ impl App {
                 self.status =
                     "playback failed — track unavailable, or mpv/yt-dlp missing (n = next)".into()
             }
-            Event::Connection(true) => self.screen = Screen::Search,
-            Event::Connection(false) => self.screen = Screen::Offline,
+            Event::Connection(true) => {
+                self.set_tab(Screen::Results);
+                self.searching = true;
+            }
+            Event::Connection(false) => {
+                self.save_sel();
+                self.stack.clear();
+                self.searching = false;
+                self.screen = Screen::Offline;
+            }
         }
     }
 
@@ -429,7 +440,7 @@ impl App {
         self.from_playlist = true;
         self.queue.set(tracks.clone(), 0);
         self.results = tracks;
-        self.screen = Screen::Results;
+        self.set_tab(Screen::Results);
         self.select(0);
         true
     }
@@ -479,41 +490,21 @@ impl App {
             self.quit = true;
             return;
         }
-        if !matches!(key.code, KeyCode::Char('P') | KeyCode::F(2)) && self.login_prompted {
-            self.login_prompted = false; // the hint expires on any other key
-            if self.status == LOGIN_HINT {
-                self.status.clear();
-            }
-        }
-        match self.screen {
-            Screen::Offline => match key.code {
+        if self.screen == Screen::Offline {
+            match key.code {
                 KeyCode::Char('r') => self.spawn(async { Ok(Msg::Online) }),
                 KeyCode::Char('q') => self.quit = true,
                 _ => {}
-            },
-            Screen::Search => match key.code {
-                KeyCode::Enter if !self.input.trim().is_empty() && !self.busy => self.run_search(),
-                KeyCode::Char(c) => self.input.push(c),
-                KeyCode::Backspace => {
-                    self.input.pop();
-                }
-                KeyCode::Esc | KeyCode::Tab if !self.results.is_empty() => {
-                    self.screen = Screen::Results
-                }
-                KeyCode::Esc => self.quit = true,
-                KeyCode::F(1) => self.open(Screen::Help),
-                KeyCode::F(2) => self.open_playlists(),
-                KeyCode::F(3) => self.open(Screen::Settings),
-                KeyCode::F(4) => self.open(Screen::History),
-                _ => {}
-            },
-            Screen::Login => match key.code {
-                KeyCode::Enter if !self.busy => self.start_login(),
-                KeyCode::Esc => self.screen = Screen::Search,
-                KeyCode::Char('q') => self.quit = true,
-                KeyCode::Char('?') => self.open(Screen::Help),
-                _ => {}
-            },
+            }
+            return;
+        }
+        if self.searching {
+            return self.handle_search_key(key);
+        }
+        if key.code == KeyCode::Char('/') {
+            return self.focus_search();
+        }
+        match self.screen {
             Screen::Help => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('?' | 'q')) {
                     self.close_overlay();
@@ -533,8 +524,31 @@ impl App {
                 }
             }
             Screen::Settings => self.handle_settings_key(key),
-            Screen::Results | Screen::Playlists | Screen::History => self.handle_list_key(key),
+            _ => self.handle_list_key(key),
         }
+    }
+
+    /// Typing in the search field: every letter is text, so only Enter, Esc/Tab and F-keys act.
+    fn handle_search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter if !self.input.trim().is_empty() && !self.busy => self.run_search(),
+            KeyCode::Char(c) => self.input.push(c),
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Esc | KeyCode::Tab => self.searching = false,
+            KeyCode::F(1) => self.open(Screen::Help),
+            KeyCode::F(2) => self.open_playlists(),
+            KeyCode::F(3) => self.open(Screen::Settings),
+            KeyCode::F(4) => self.set_tab(Screen::History),
+            _ => {}
+        }
+    }
+
+    /// Focus the search field over the current tab (overlays close).
+    fn focus_search(&mut self) {
+        self.close_all();
+        self.searching = true;
     }
 
     /// Remember where the playing track is, so History can resume it.
@@ -576,14 +590,14 @@ impl App {
         bg(move || s.save());
     }
 
-    /// Open Help, Settings or History over the current screen (Esc comes back).
+    /// Open Help or Settings over the current screen (Esc comes back).
     fn open(&mut self, s: Screen) {
+        self.searching = false;
         if self.screen == s {
             return;
         }
         if !self.screen.is_overlay() {
             self.stack.clear();
-            self.saved_sel = (self.selected, self.offset);
         }
         // Reopening a screen already below us goes back to it instead of nesting.
         match self.stack.iter().position(|&x| x == s) {
@@ -597,27 +611,73 @@ impl App {
                 self.setting_row = 0;
                 self.confirm_clear = false;
             }
-            Screen::History => {
-                self.offset = 0;
-                self.select(0);
-            }
             _ => {}
         }
     }
 
-    /// Leave an overlay for the screen under it; a list gets its selection back.
+    /// Leave an overlay for the screen under it.
     fn close_overlay(&mut self) {
-        self.screen = self.stack.pop().unwrap_or(Screen::Search);
-        if !self.screen.is_overlay() {
-            self.offset = self.saved_sel.1;
-            self.select(self.saved_sel.0);
+        self.screen = self.stack.pop().unwrap_or(Screen::Results);
+    }
+
+    /// Leave every overlay.
+    fn close_all(&mut self) {
+        while self.screen.is_overlay() {
+            self.close_overlay();
         }
     }
 
-    /// Leave every overlay (before jumping to an unrelated screen).
-    fn close_all(&mut self) {
-        while self.screen.is_overlay() && !self.stack.is_empty() {
-            self.close_overlay();
+    /// The tab shown in the J-card (the one under any overlay).
+    pub fn tab(&self) -> Screen {
+        if self.screen.is_overlay() {
+            self.stack.first().copied().unwrap_or(Screen::Results)
+        } else {
+            self.screen
+        }
+    }
+
+    /// Remember the active tab's selection so switching back restores it.
+    fn save_sel(&mut self) {
+        if let Some(i) = self.tab().tab_index() {
+            self.tab_sel[i] = (self.selected, self.offset);
+        }
+    }
+
+    /// Selected row of `tab`, active or not.
+    fn sel_of(&self, tab: Screen) -> usize {
+        match tab.tab_index() {
+            _ if self.tab().tab_index() == tab.tab_index() => self.selected,
+            Some(i) => self.tab_sel[i].0,
+            None => 0,
+        }
+    }
+
+    /// Select row `i` of `tab`, active or not (an inactive tab clamps when shown).
+    fn set_sel(&mut self, tab: Screen, i: usize) {
+        if self.tab() == tab {
+            self.select(i);
+        } else if let Some(t) = tab.tab_index() {
+            self.tab_sel[t] = (i, 0);
+        }
+    }
+
+    /// Show `tab` in the J-card with its own selection; overlays and search focus close.
+    fn set_tab(&mut self, tab: Screen) {
+        self.close_all();
+        self.searching = false;
+        self.save_sel();
+        self.screen = tab;
+        if let Some(i) = tab.tab_index() {
+            (self.selected, self.offset) = self.tab_sel[i];
+            self.select(self.selected);
+        }
+    }
+
+    /// Switch to `TABS[i]`; the Lists tab goes through the sign-in check.
+    fn goto_tab(&mut self, i: usize) {
+        match TABS[i % TABS.len()] {
+            Screen::Playlists => self.open_playlists(),
+            t => self.set_tab(t),
         }
     }
 
@@ -630,7 +690,7 @@ impl App {
             }
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') | KeyCode::F(1) => self.open(Screen::Help),
-            KeyCode::Char(commands::history::KEY) | KeyCode::F(4) => self.open(Screen::History),
+            KeyCode::Char(commands::history::KEY) | KeyCode::F(4) => self.set_tab(Screen::History),
             KeyCode::Char('j') | KeyCode::Down => {
                 self.setting_row = (self.setting_row + 1).min(Row::ALL.len() - 1)
             }
@@ -673,6 +733,7 @@ impl App {
             return;
         }
         let last = self.len().saturating_sub(1);
+        let tab = self.tab().tab_index().unwrap_or(0);
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.select(self.selected.saturating_add(1)),
             KeyCode::Char('k') | KeyCode::Up => self.select(self.selected.saturating_sub(1)),
@@ -680,6 +741,14 @@ impl App {
             KeyCode::PageUp => self.select(self.selected.saturating_sub(self.page)),
             KeyCode::Char('g') | KeyCode::Home => self.select(0),
             KeyCode::Char('G') | KeyCode::End => self.select(last),
+            KeyCode::Tab => self.goto_tab(tab + 1),
+            KeyCode::BackTab => self.goto_tab(tab + TABS.len() - 1),
+            KeyCode::Char(c @ '1'..='4') => self.goto_tab(c as usize - '1' as usize),
+            KeyCode::Enter if self.screen == Screen::Login => {
+                if !self.busy {
+                    self.start_login()
+                }
+            }
             KeyCode::Enter if self.screen == Screen::Playlists => {
                 if self.busy {
                     return; // never fall through to playing a stale search result
@@ -704,6 +773,17 @@ impl App {
                     self.play_current();
                 }
             }
+            KeyCode::Enter if self.screen == Screen::Queue => {
+                // Row 0 is the current track (when there is one); the rest are `upcoming`.
+                let n = self
+                    .selected
+                    .checked_sub(usize::from(self.queue.current().is_some()));
+                if let Some(n) = n
+                    && self.queue.jump(n).is_some()
+                {
+                    self.play_current();
+                }
+            }
             KeyCode::Enter => {
                 self.play_selected();
                 if !self.from_playlist
@@ -716,32 +796,25 @@ impl App {
                 }
             }
             KeyCode::Char('a') if self.screen == Screen::Results => self.queue_selected(),
-            KeyCode::Char('P') | KeyCode::F(2) => {
-                self.close_all();
-                self.open_playlists()
-            }
-            KeyCode::Esc | KeyCode::Char(commands::history::KEY) | KeyCode::F(4)
-                if self.screen == Screen::History =>
-            {
-                self.close_overlay()
-            }
+            KeyCode::Char('P') | KeyCode::F(2) => self.open_playlists(),
             KeyCode::Char(commands::settings::KEY) | KeyCode::F(3) => self.open(Screen::Settings),
-            KeyCode::Char(commands::history::KEY) | KeyCode::F(4) => self.open(Screen::History),
-            KeyCode::Char('/') | KeyCode::Esc => {
-                self.close_all();
-                self.screen = Screen::Search
-            }
-            KeyCode::Char('?') => self.open(Screen::Help),
+            KeyCode::Char(commands::history::KEY) | KeyCode::F(4) => self.set_tab(Screen::History),
+            KeyCode::Esc => self.focus_search(),
+            KeyCode::Char('?') | KeyCode::F(1) => self.open(Screen::Help),
             KeyCode::Char('q') => self.quit = true,
             _ => {}
         }
     }
 
-    /// Length of the list shown on the current screen.
+    /// Length of the list in the active tab.
     pub fn len(&self) -> usize {
-        match self.screen {
+        match self.tab() {
             Screen::Playlists => self.playlists.len(),
             Screen::History => self.history.len(),
+            Screen::Queue => {
+                usize::from(self.queue.current().is_some()) + self.queue.upcoming().count()
+            }
+            Screen::Login => 0,
             _ => self.results.len(),
         }
     }
@@ -773,6 +846,7 @@ mod tests {
             })
             .collect();
         a.page = 5;
+        a.searching = false;
         a
     }
 
@@ -794,7 +868,7 @@ mod tests {
         assert_eq!(a.screen, Screen::Offline);
         a.tx.send(Msg::Online).unwrap();
         a.tick();
-        assert_eq!(a.screen, Screen::Search); // guests are never forced to log in
+        assert_eq!((a.screen, a.searching), (Screen::Results, true)); // guests are never forced to log in
         a.tx.send(Msg::Tracks(Vec::new())).unwrap();
         a.tick();
         assert_eq!(
@@ -855,7 +929,8 @@ mod tests {
     #[test]
     fn search_typing_and_esc() {
         let mut a = App::blank();
-        a.screen = Screen::Search;
+        a.screen = Screen::Results;
+        a.searching = true;
         a.results.clear();
         for c in "pq".chars() {
             press(&mut a, KeyCode::Char(c)); // command letters are plain text here
@@ -867,7 +942,11 @@ mod tests {
             id: "i".into(),
         }];
         press(&mut a, KeyCode::Esc);
-        assert_eq!((a.screen, a.quit), (Screen::Results, false));
+        assert_eq!(
+            (a.screen, a.searching, a.quit),
+            (Screen::Results, false, false)
+        );
+        assert_eq!(a.input, "pq"); // leaving the field keeps the text
     }
 
     #[test]
@@ -894,14 +973,20 @@ mod tests {
     }
 
     #[test]
-    fn logged_out_playlists_hint_then_login() {
+    fn logged_out_lists_tab_shows_sign_in() {
         let mut a = app();
+        a.select(3);
         a.open_playlists_as(false);
-        assert_eq!((a.screen, a.status.as_str()), (Screen::Results, LOGIN_HINT));
-        assert!(a.login_prompted);
-        a.open_playlists_as(false); // asking again opens the Login screen
-        assert_eq!((a.screen, a.status.as_str()), (Screen::Login, ""));
-        assert!(!a.login_prompted);
+        assert_eq!(
+            (a.screen, a.tab().tab_index(), a.len()),
+            (Screen::Login, Some(2), 0)
+        );
+        assert!(a.status.is_empty());
+        a.busy = true;
+        press(&mut a, KeyCode::Enter); // busy: no second login is started
+        assert_eq!(a.screen, Screen::Login);
+        press(&mut a, KeyCode::Char('1'));
+        assert_eq!((a.screen, a.selected), (Screen::Results, 3));
     }
 
     #[test]
@@ -936,17 +1021,15 @@ mod tests {
     }
 
     #[test]
-    fn f2_on_search_asks_for_login_but_p_is_text() {
+    fn f2_on_search_opens_lists_but_p_is_text() {
         let mut a = App::blank();
-        a.screen = Screen::Search;
+        a.screen = Screen::Results;
+        a.searching = true;
         press(&mut a, KeyCode::Char('P'));
-        assert_eq!((a.input.as_str(), a.screen), ("P", Screen::Search));
-        a.input.clear();
+        assert_eq!((a.input.as_str(), a.screen), ("P", Screen::Results));
         a.logged_in = Some(false);
         press(&mut a, KeyCode::F(2));
-        assert_eq!((a.status.as_str(), a.screen), (LOGIN_HINT, Screen::Search));
-        press(&mut a, KeyCode::F(2));
-        assert_eq!(a.screen, Screen::Login);
+        assert_eq!((a.screen, a.searching), (Screen::Login, false));
     }
 
     #[test]
@@ -957,7 +1040,7 @@ mod tests {
             id: id.into(),
         };
         let mut a = app();
-        a.screen = Screen::Search;
+        a.searching = true;
         a.tx.send(Msg::PlaylistTracks("pl".into(), vec![t("a")]))
             .unwrap();
         a.tick();
@@ -976,15 +1059,20 @@ mod tests {
     }
 
     #[test]
-    fn login_hint_expires_on_other_keys() {
+    fn p_and_digit_reach_the_lists_tab_signed_out() {
         let mut a = app();
         a.logged_in = Some(false);
-        press(&mut a, KeyCode::Char('P'));
-        assert!(a.login_prompted);
-        press(&mut a, KeyCode::Char('j'));
-        assert!(!a.login_prompted && a.status.is_empty());
-        press(&mut a, KeyCode::Char('P'));
-        assert_eq!(a.screen, Screen::Results); // hint again, not Login
+        for k in [KeyCode::Char('P'), KeyCode::F(2), KeyCode::Char('3')] {
+            press(&mut a, KeyCode::Char('1'));
+            press(&mut a, k);
+            assert_eq!(a.screen, Screen::Login, "{k:?}");
+        }
+        press(&mut a, KeyCode::Tab);
+        assert_eq!(a.screen, Screen::History);
+        press(&mut a, KeyCode::BackTab);
+        assert_eq!(a.screen, Screen::Login);
+        press(&mut a, KeyCode::Esc); // a list's Esc focuses the search field
+        assert!(a.searching && a.screen == Screen::Login);
     }
 
     #[test]
@@ -1017,7 +1105,7 @@ mod tests {
         a.on_event(Event::Connection(false));
         assert_eq!(a.screen, Screen::Offline);
         a.on_event(Event::Connection(true));
-        assert_eq!(a.screen, Screen::Search);
+        assert_eq!((a.screen, a.searching), (Screen::Results, true));
         a.queue.set(a.results.clone(), 29);
         a.on_event(Event::TrackEnded); // last track: queue ends
         assert!(a.queue.current().is_none());
@@ -1033,20 +1121,26 @@ mod tests {
     }
 
     #[test]
-    fn search_tab_and_esc_return_to_results_or_quit() {
+    fn search_focus_tab_and_esc_never_quit() {
         let mut a = app();
         press(&mut a, KeyCode::Esc);
-        assert_eq!(a.screen, Screen::Search);
+        assert_eq!((a.screen, a.searching), (Screen::Results, true));
         press(&mut a, KeyCode::Tab);
-        assert_eq!(a.screen, Screen::Results);
+        assert_eq!((a.screen, a.searching), (Screen::Results, false));
         press(&mut a, KeyCode::Char('/'));
         press(&mut a, KeyCode::Esc);
-        assert_eq!(a.screen, Screen::Results);
-        a.screen = Screen::Search;
-        a.results.clear();
+        assert_eq!((a.screen, a.searching), (Screen::Results, false));
+        a.results.clear(); // nothing behind the field: Esc still only leaves it
+        a.searching = true;
         press(&mut a, KeyCode::Tab);
-        assert_eq!((a.screen, a.quit), (Screen::Search, false));
+        assert!(!a.searching && !a.quit);
+        a.searching = true;
         press(&mut a, KeyCode::Esc);
+        assert!(!a.searching && !a.quit);
+        a.searching = true;
+        press(&mut a, KeyCode::Char('q')); // a letter while typing
+        assert_eq!((a.input.as_str(), a.quit), ("q", false));
+        a.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(a.quit);
     }
 
@@ -1057,9 +1151,8 @@ mod tests {
         for (key, screen) in [
             (KeyCode::Char('S'), Screen::Settings),
             (KeyCode::F(3), Screen::Settings),
-            (KeyCode::Char('H'), Screen::History),
-            (KeyCode::F(4), Screen::History),
             (KeyCode::Char('?'), Screen::Help),
+            (KeyCode::F(1), Screen::Help),
         ] {
             press(&mut a, key);
             assert_eq!(a.screen, screen);
@@ -1067,8 +1160,8 @@ mod tests {
             assert_eq!((a.screen, a.selected), (Screen::Results, 7), "{key:?}");
         }
         // Toggle keys close their own screen.
-        press(&mut a, KeyCode::Char('H'));
-        press(&mut a, KeyCode::Char('H'));
+        press(&mut a, KeyCode::Char('S'));
+        press(&mut a, KeyCode::Char('S'));
         assert_eq!(a.screen, Screen::Results);
         press(&mut a, KeyCode::Char('S'));
         press(&mut a, KeyCode::Char('?'));
@@ -1076,11 +1169,16 @@ mod tests {
         assert_eq!(a.screen, Screen::Settings); // Help returns to the overlay it came from
         press(&mut a, KeyCode::Esc);
         assert_eq!(a.screen, Screen::Results);
-        // From Search the F-keys open them and Esc goes back to Search.
-        a.screen = Screen::Search;
-        press(&mut a, KeyCode::F(4));
+        // From the search field the F-keys open them; Esc comes back to the list.
+        a.searching = true;
+        press(&mut a, KeyCode::F(3));
+        assert_eq!((a.screen, a.searching), (Screen::Settings, false));
         press(&mut a, KeyCode::Esc);
-        assert_eq!(a.screen, Screen::Search);
+        assert_eq!((a.screen, a.selected), (Screen::Results, 7));
+        // `/` from an overlay closes it and focuses the field.
+        press(&mut a, KeyCode::Char('?'));
+        press(&mut a, KeyCode::Char('/'));
+        assert_eq!((a.screen, a.searching), (Screen::Results, true));
     }
 
     #[test]
@@ -1156,7 +1254,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["new", "old"]
         );
-        a.screen = Screen::Settings;
+        (a.screen, a.searching) = (Screen::Settings, false);
         a.stack = vec![Screen::Results];
         a.setting_row = Row::ALL
             .iter()
@@ -1259,23 +1357,37 @@ mod tests {
     }
 
     #[test]
-    fn leaving_overlays_by_other_keys_restores_selection() {
+    fn each_tab_keeps_its_own_selection() {
         let mut a = app();
+        for id in ["h2", "h1", "h0"] {
+            history::push(&mut a.history, track(id));
+        }
         a.select(7);
         press(&mut a, KeyCode::Char('H'));
-        press(&mut a, KeyCode::Char('/'));
-        assert_eq!((a.screen, a.selected), (Screen::Search, 7));
-        assert!(a.stack.is_empty() || !a.screen.is_overlay());
+        assert_eq!((a.screen, a.selected), (Screen::History, 0));
+        press(&mut a, KeyCode::Char('j'));
+        press(&mut a, KeyCode::Char('/')); // the field opens over History
+        assert_eq!((a.screen, a.searching), (Screen::History, true));
         press(&mut a, KeyCode::Esc);
+        press(&mut a, KeyCode::Char('1'));
         assert_eq!((a.screen, a.selected), (Screen::Results, 7));
-        press(&mut a, KeyCode::Char('H'));
+        press(&mut a, KeyCode::Char('4'));
+        assert_eq!((a.screen, a.selected), (Screen::History, 1));
+        press(&mut a, KeyCode::Char('H')); // already there: stays
+        assert_eq!((a.screen, a.selected), (Screen::History, 1));
+        a.history.truncate(1); // the list shrank while away: clamped on return
+        press(&mut a, KeyCode::Char('1'));
+        press(&mut a, KeyCode::Char('4'));
+        assert_eq!(a.selected, 0);
         a.logged_in = Some(false);
         press(&mut a, KeyCode::F(2));
+        press(&mut a, KeyCode::BackTab);
+        press(&mut a, KeyCode::BackTab);
         assert_eq!((a.screen, a.selected), (Screen::Results, 7));
     }
 
     #[test]
-    fn help_and_settings_return_to_the_overlay_they_came_from() {
+    fn help_and_settings_return_to_the_tab_or_overlay_they_came_from() {
         let mut a = app();
         a.select(4);
         press(&mut a, KeyCode::Char('H'));
@@ -1286,9 +1398,9 @@ mod tests {
         press(&mut a, KeyCode::Esc);
         assert_eq!(a.screen, Screen::History);
         press(&mut a, KeyCode::Char('S'));
-        press(&mut a, KeyCode::Char('H')); // reopening History goes back to it, not deeper
-        assert_eq!((a.screen, a.stack.len()), (Screen::History, 1));
-        press(&mut a, KeyCode::Esc);
+        press(&mut a, KeyCode::Char('H')); // History from Settings closes the overlay
+        assert_eq!((a.screen, a.stack.len()), (Screen::History, 0));
+        press(&mut a, KeyCode::Tab); // wraps to Results
         assert_eq!((a.screen, a.selected), (Screen::Results, 4));
     }
 
@@ -1324,9 +1436,67 @@ mod tests {
     }
 
     #[test]
-    fn screen_overlay_flags() {
-        assert!(Screen::Help.is_overlay() && Screen::History.is_overlay());
-        assert!(!Screen::Results.is_overlay() && !Screen::Search.is_overlay());
+    fn screen_overlay_flags_and_tabs() {
+        assert!(Screen::Help.is_overlay() && Screen::Settings.is_overlay());
+        assert!(!Screen::Results.is_overlay() && !Screen::History.is_overlay());
+        assert_eq!(
+            TABS.map(|t| t.tab_index()),
+            [Some(0), Some(1), Some(2), Some(3)]
+        );
+        assert_eq!(Screen::Login.tab_index(), Some(2));
+        assert_eq!(Screen::Help.tab_index(), None);
+    }
+
+    #[test]
+    fn queue_tab_lists_current_then_upcoming_and_enter_jumps() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('2'));
+        assert_eq!((a.screen, a.len()), (Screen::Queue, 0));
+        press(&mut a, KeyCode::Enter); // empty: nothing happens
+        assert!(a.queue.current().is_none());
+        a.queue.add(track("x")); // nothing current: row 0 is the first upcoming
+        a.queue.add(track("y"));
+        assert_eq!(a.len(), 2);
+        press(&mut a, KeyCode::Char('j'));
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("y"));
+        assert_eq!((a.len(), a.selected), (1, 0));
+        a.queue
+            .set(vec![track("a"), track("b"), track("c"), track("d")], 0);
+        assert_eq!(a.len(), 4);
+        press(&mut a, KeyCode::Enter); // row 0 is the playing track: unchanged
+        assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("a"));
+        press(&mut a, KeyCode::Char('G'));
+        press(&mut a, KeyCode::Enter); // row 3 = upcoming[2]
+        assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("d"));
+        assert_eq!((a.len(), a.selected), (1, 0));
+        assert_eq!(a.queue.prev().map(|t| t.id.as_str()), Some("c"));
+        a.player.stop();
+    }
+
+    #[test]
+    fn results_follow_the_playing_track_from_another_tab() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('2'));
+        a.queue.set(a.results.clone(), 12);
+        a.on_event(Event::TrackStarted("12".into()));
+        assert_eq!((a.screen, a.selected), (Screen::Queue, 0));
+        press(&mut a, KeyCode::Char('1'));
+        assert_eq!(a.selected, 12);
+        assert!((a.offset..a.offset + a.page).contains(&12)); // scrolled into view
+    }
+
+    #[test]
+    fn tracks_reply_switches_to_results_with_list_focus() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('4'));
+        a.searching = true;
+        a.tx.send(Msg::Tracks(vec![track("n")])).unwrap();
+        a.tick();
+        assert_eq!(
+            (a.screen, a.searching, a.selected),
+            (Screen::Results, false, 0)
+        );
     }
 
     #[test]

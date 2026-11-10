@@ -23,31 +23,33 @@ In the [Google Cloud console](https://console.cloud.google.com/apis/credentials)
 cargo run
 ```
 
-Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track to play it. Playlists need Google sign-in: press `P` (`F2` on Search) and, if you are signed out, the status bar says so; press `P` again to reach the Login screen, then **Enter**: your browser opens, you approve, and the app continues on its own. You can also run `termusic login`.
+Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track to play it. Playlists need Google sign-in: press `P` or `3` (`F2` while typing a search) and, if you are signed out, the Lists tab shows a sign-in prompt; press **Enter**: your browser opens, you approve, and the app continues on its own. You can also run `termusic login`.
 
 ## Behavior
 
 ### Startup
 1. Checks connectivity. If offline, shows the **Offline** screen (`r` retries, `q` quits).
-2. Otherwise goes straight to **Search**; signing in is optional.
+2. Otherwise starts on the **Results** tab with the search field focused; signing in is optional.
 3. If `mpv` or `yt-dlp` can't be run, the status bar says which is missing.
 
 ### Screens
+The list pane has four tabs (`Tab`/`Shift-Tab` or `1`-`4`); each keeps its own selection. Settings and Help open over the list.
+
 | Screen | What it does |
 |--------|--------------|
-| Login | Optional Google sign-in (press `P` twice when signed out). Opens your browser; shows the URL while waiting. `Esc` goes back. |
-| Search | Text prompt. `Enter` runs the query (via `yt-dlp`, no account needed) and shows the top 30 results. `Esc` or `Tab` goes back to the results when there are some, otherwise `Esc` quits. |
-| Results | Scrollable list of tracks (title and channel). Text only, no thumbnails. |
-| Playlists | Your YouTube playlists (needs sign-in). `Enter` loads the playlist (first 50 tracks) as the queue, in order, and plays the first track; the list then shows it. |
-| History | The last 10 played tracks (`H`, `F4` on Search). `Enter` replays from there, resuming where you stopped, and the queue follows history order. |
-| Settings | `S` (`F3` on Search): volume (`←`/`→` or `-`/`+`), color shell (`←`/`→` on its row: TPS-L2, Sunset tape, Amber hi-fi), history file path (`Enter` shows how to change it), clear history (`Enter` twice). |
+| Search field | At the top of every tab (`/`). `Enter` runs the query (via `yt-dlp`, no account needed) and shows the top 30 results on the Results tab. `Esc` or `Tab` leaves the field and keeps the text; it never quits. |
+| Results (`1`) | Scrollable list of tracks (title and channel). Text only, no thumbnails. Follows the playing track. |
+| Queue (`2`) | The playing track, then what plays next. `Enter` jumps to the highlighted track; the ones before it count as played (`b` goes back through them). |
+| Lists (`3`, `P`) | Your YouTube playlists. `Enter` loads the playlist (first 50 tracks) as the queue, in order, and plays the first track; the Results tab then shows it. Signed out, the tab shows a sign-in prompt instead: `Enter` opens your browser and shows the URL while waiting. |
+| History (`4`, `H`) | The last 10 played tracks. `Enter` replays from there, resuming where you stopped, and the queue follows history order. |
+| Settings | `S` (`F3` while typing): volume (`←`/`→` or `-`/`+`), color shell (`←`/`→` on its row: TPS-L2, Sunset tape, Amber hi-fi), history file path (`Enter` shows how to change it), clear history (`Enter` twice). |
 | Help | Lists every enabled command and keybinding, grouped; scrolls with `j`/`k`, `PgUp`/`PgDn`, `g`/`G`. |
 | Offline | Shown whenever a network action finds no connection. |
 
 ### Keys
 | Key | Action |
 |-----|--------|
-| `Enter` | Play the highlighted track and replace the list with its YouTube mix (related tracks; `n` follows it). Playlists: play the playlist from its first track, in its own order |
+| `Enter` | Play the highlighted track and replace the list with its YouTube mix (related tracks; `n` follows it). Playlists: play the playlist from its first track, in its own order. Queue: jump to the highlighted track |
 | `a` | Add the highlighted result to the queue (plays after the current track, before the mix) |
 | `p` | Pause / resume |
 | `n` | Next track |
@@ -56,17 +58,18 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 | `l` | Cycle loop: off / one (↻1) / all (↻) |
 | `+` / `-` | Volume up / down |
 | `,` / `.` | Seek back / forward 5s |
-| `/` | New search |
-| `P` (`F2` on the Search screen) | Your playlists; signed out, a status message asks you to log in |
+| `/` | Focus the search field (from any tab; closes Settings and Help) |
+| `P` (`F2` while typing) | Lists tab; signed out, it shows the sign-in prompt |
 | `j` / `↓`, `k` / `↑` | Move selection |
 | `PgDn` / `PgUp` | Move one page |
 | `g` / `G` | Jump to first / last |
-| `S` (`F3` on Search) | Settings |
-| `H` (`F4` on Search) | History: last 10 played tracks; the file is `history.json` in the config dir, or set `TERMUSIC_HISTORY` / `history_path` in `settings.json` |
-| `Tab` | On Search: back to the results list |
-| `Esc` | Back: Search to results; Help, Settings and History to the screen they were opened from |
-| `?` (`F1` on the Search screen) | Help |
-| `q` | Quit (`Esc` on Search; `Ctrl+C` anywhere) |
+| `S` (`F3` while typing) | Settings |
+| `H` (`F4` while typing) | History tab: last 10 played tracks; the file is `history.json` in the config dir, or set `TERMUSIC_HISTORY` / `history_path` in `settings.json` |
+| `Tab` / `Shift-Tab` | Next / previous tab (wraps). In the search field `Tab` leaves it |
+| `1` `2` `3` `4` | Results, Queue, Lists, History tab |
+| `Esc` | Leave the search field (keeps the text); close Help or Settings; in a list, focus the search field |
+| `?` (`F1` while typing) | Help |
+| `q` | Quit (a letter while typing; `Ctrl+C` anywhere) |
 
 ### Playback
 - Plays one track at a time through `mpv --no-video`, controlled over mpv's IPC socket.

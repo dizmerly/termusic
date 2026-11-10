@@ -137,6 +137,19 @@ impl Queue {
         self.current.as_ref()
     }
 
+    /// Make `upcoming[n]` current; the current track and those before it count as played.
+    /// `None` (no change) if there is no such track.
+    pub fn jump(&mut self, n: usize) -> Option<&Track> {
+        if n >= self.upcoming.len() {
+            return None;
+        }
+        self.history.extend(self.current.take());
+        self.history.extend(self.upcoming.drain(..n));
+        self.user_added = self.user_added.saturating_sub(n + 1);
+        self.current = self.upcoming.pop_front();
+        self.current.as_ref()
+    }
+
     /// Go back to the last played track; the current one plays next. `None` (no change) at the start.
     // shortcut: a loop-all wrap clears history, so prev stops at the start of each lap; keep laps if users miss it.
     pub fn prev(&mut self) -> Option<&Track> {
@@ -481,6 +494,36 @@ mod tests {
         q.next(); // wrapped: history starts over
         assert_eq!(q.prev(), None);
         assert_eq!(id(q.current()), Some("a"));
+    }
+
+    #[test]
+    fn jump_plays_the_chosen_track_and_keeps_the_rest() {
+        let mut q = q(&["a", "b", "c", "d"], 0);
+        assert_eq!(q.jump(3), None); // out of range: unchanged
+        assert_eq!(id(q.current()), Some("a"));
+        assert_eq!(id(q.jump(1)), Some("c"));
+        assert_eq!(q.history, [t("a"), t("b")]);
+        assert_eq!(ids(&q), ["d"]);
+        assert_eq!(id(q.prev()), Some("b")); // back walks the skipped tracks in order
+        assert_eq!(ids(&q), ["c", "d"]);
+        assert_eq!(id(q.jump(0)), Some("c"));
+    }
+
+    #[test]
+    fn jump_keeps_user_queued_count() {
+        let mut q = q(&["a", "m1", "m2"], 0);
+        q.add(t("x"));
+        q.add(t("y")); // upcoming: x y m1 m2, two user-queued
+        q.jump(0); // x plays; y is still user-queued
+        assert_eq!(q.user_added, 1);
+        q.add(t("z")); // after y, before the mix
+        assert_eq!(ids(&q), ["y", "z", "m1", "m2"]);
+        q.jump(3); // past every user-queued track
+        assert_eq!((id(q.current()), q.user_added), (Some("m2"), 0));
+        let mut e = Queue::new(); // nothing current: the first upcoming row is index 0
+        e.add(t("a"));
+        assert_eq!(id(e.jump(0)), Some("a"));
+        assert!(e.history.is_empty());
     }
 
     #[test]
