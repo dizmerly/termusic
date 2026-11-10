@@ -1,5 +1,7 @@
 //! Rendering. Reads `App`, never mutates state (except the visible page size).
-use crate::app::{App, Screen};
+use crate::app::{App, Row, Screen};
+use crate::history::Entry;
+use crate::queue::Loop;
 use crate::theme::{self, fg};
 use crate::{commands, youtube::Track};
 use ratatui::{
@@ -7,18 +9,22 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{List, ListItem, Paragraph, Wrap},
+    widgets::{Block, List, ListItem, Paragraph, Wrap},
 };
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let [logo, body, bar] = Layout::vertical([
+    let show_next = app.screen != Screen::Help
+        && f.area().height >= 12
+        && app.queue.upcoming().next().is_some();
+    let [logo, body, next, bar] = Layout::vertical([
         // Logo only when there's room; Help needs every row.
         Constraint::Length(if app.screen == Screen::Help || f.area().height < 20 {
             0
         } else {
-            6
+            8
         }),
         Constraint::Min(3),
+        Constraint::Length(u16::from(show_next)),
         Constraint::Length(1),
     ])
     .areas(f.area());
@@ -79,33 +85,163 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             };
             msg(f, lines, "Login", theme::GREEN)
         }
-        Screen::Search => f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("{} ", theme::ICON_NOTE), fg(theme::PINK)),
-                Span::styled(app.input.clone(), fg(theme::YELLOW)),
-                Span::styled("▏", fg(theme::PINK)),
-            ]))
-            .block(theme::panel(
-                "Search · Enter to run · Esc to quit",
-                theme::CYAN,
-            )),
-            body,
-        ),
-        Screen::Help => draw_help(f, body),
+        Screen::Search => {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("{} ", theme::ICON_NOTE), fg(theme::PINK)),
+                    Span::styled(app.input.clone(), fg(theme::YELLOW)),
+                    Span::styled("▏", fg(theme::PINK)),
+                ]))
+                .block(theme::panel(
+                    if app.results.is_empty() {
+                        "Search · Enter run · Esc: quit"
+                    } else {
+                        "Search · Enter run · Esc/Tab: back to results"
+                    },
+                    theme::CYAN,
+                )),
+                body,
+            );
+            // Below the input row, inside the panel border.
+            let art = Rect::new(
+                body.x + 1,
+                body.y + 2,
+                body.width.saturating_sub(2),
+                body.height.saturating_sub(3),
+            );
+            draw_cassette(f, app, art);
+        }
+        Screen::Help => draw_help(f, app, body),
+        Screen::Settings => draw_settings(f, app, body),
+        Screen::History => {
+            let rows: Vec<Track> = app.history.iter().map(history_row).collect();
+            let title = "History · Enter replays from where you stopped · Esc back";
+            draw_list(f, app, &rows, title, theme::YELLOW, body);
+        }
         Screen::Results => {
-            let title = format!("Results ({})", app.results.len());
+            let title = format!(
+                "Results ({}) · / or Esc: search · ? help",
+                app.results.len()
+            );
             let rows = std::mem::take(&mut app.results);
+            let body = cassette_above(f, app, body);
             draw_list(f, app, &rows, &title, theme::PURPLE, body);
             app.results = rows;
         }
         Screen::Playlists => {
             let rows = std::mem::take(&mut app.playlists);
-            draw_list(f, app, &rows, "Playlists · Enter opens", theme::GREEN, body);
+            draw_list(f, app, &rows, "Playlists · Enter plays", theme::GREEN, body);
             app.playlists = rows;
         }
     }
 
+    if show_next {
+        draw_next(f, app, next);
+    }
     draw_bar(f, app, bar);
+    draw_volume(f, app.player.volume, f.area());
+}
+
+/// Cassette art with spinning reels; `spin` picks the frame (0 when idle) and
+/// `now` is the now-playing text shown on the label.
+fn cassette_lines(spin: usize, now: &str) -> Vec<Line<'static>> {
+    let reel = theme::REEL_FRAMES[spin % theme::REEL_FRAMES.len()].to_string();
+    theme::CASSETTE
+        .iter()
+        .map(|l| {
+            let field = l.matches('#').count();
+            let l = if field > 0 {
+                let t = if now.is_empty() {
+                    String::new()
+                } else {
+                    fit(now, field)
+                };
+                l.replace(&"#".repeat(field), &format!("{t:^field$}"))
+            } else {
+                (*l).to_owned()
+            };
+            let mut spans = Vec::new();
+            for (i, part) in l.split('@').enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(reel.clone(), fg(theme::YELLOW).bold()));
+                }
+                spans.push(Span::styled(part.to_owned(), fg(theme::PINK)));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Draws the cassette centered in `area` if it fits; reels spin only while playing.
+fn draw_cassette(f: &mut Frame, app: &App, area: Rect) {
+    let spin = if app.player.playing {
+        app.player.position as usize
+    } else {
+        0
+    };
+    // Same text as the status bar.
+    let now = match (&app.player.now_playing, app.player.playing) {
+        (Some(t), true) => format!("{} {t}", theme::ICON_PLAY),
+        (Some(t), false) => format!("{} {t}", theme::ICON_PAUSE),
+        _ => "nothing playing".into(),
+    };
+    let lines = cassette_lines(spin, &now);
+    if area.height >= lines.len() as u16 && area.width >= lines[0].width() as u16 {
+        f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
+    }
+}
+
+/// Reserves a cassette strip at the top of `body` when there's room; returns the rest.
+fn cassette_above(f: &mut Frame, app: &App, body: Rect) -> Rect {
+    let h = theme::CASSETTE.len() as u16;
+    if body.height < h + 6 || body.width < theme::CASSETTE[0].len() as u16 {
+        return body;
+    }
+    let [top, rest] = Layout::vertical([Constraint::Length(h), Constraint::Min(3)]).areas(body);
+    draw_cassette(f, app, top);
+    rest
+}
+
+/// `filled`/`░` bar of `width` cells for a 0..=1 fraction.
+fn bar(frac: f64, width: usize) -> String {
+    let n = (frac.clamp(0.0, 1.0) * width as f64).round() as usize;
+    "█".repeat(n) + &"░".repeat(width - n)
+}
+
+fn mmss(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    format!("{:02}:{:02}", s / 60, s % 60)
+}
+
+/// `♪ ████████░░ 80%` in the top-right corner, skipped when it would crowd the screen.
+fn draw_volume(f: &mut Frame, vol: u8, area: Rect) {
+    const W: u16 = 17;
+    if area.width < 40 || area.height == 0 {
+        return;
+    }
+    let text = format!(
+        " {} {} {vol:>3}%",
+        theme::ICON_NOTE,
+        bar(f64::from(vol) / 100.0, 10)
+    );
+    // Inset 2 columns so a panel's corner stays intact when row 0 is its border.
+    let r = Rect::new(area.right() - W - 3, area.y, W + 1, 1);
+    f.render_widget(Paragraph::new(Span::styled(text, fg(theme::PINK))), r);
+}
+
+/// `next: A · B · C` for the next three tracks, cut to the width.
+fn draw_next(f: &mut Frame, app: &App, area: Rect) {
+    let titles: Vec<&str> = app
+        .queue
+        .upcoming()
+        .take(3)
+        .map(|t| t.title.as_str())
+        .collect();
+    let text = fit(
+        &format!(" next: {}", titles.join(" · ")),
+        area.width as usize,
+    );
+    f.render_widget(Paragraph::new(Span::styled(text, fg(theme::CYAN))), area);
 }
 
 fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -116,13 +252,18 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
     };
     let mut spans = vec![
         Span::styled(format!(" {icon} "), fg(color).bold()),
-        Span::styled(text, fg(color)),
+        Span::styled(text.to_owned(), fg(color)),
     ];
-    if app.player.shuffle {
-        spans.push(Span::raw(format!(" {}", theme::ICON_SHUFFLE)));
-    }
-    if app.player.looping {
-        spans.push(Span::raw(format!(" {}", theme::ICON_LOOP)));
+    let loop_icon = match app.queue.looping {
+        Loop::Off => None,
+        Loop::All => Some(theme::ICON_LOOP),
+        Loop::One => Some(theme::ICON_LOOP_ONE),
+    };
+    for icon in [app.queue.shuffle.then_some(theme::ICON_SHUFFLE), loop_icon]
+        .into_iter()
+        .flatten()
+    {
+        spans.push(Span::raw(format!(" {icon}")));
     }
     if app.busy {
         spans.push(Span::styled(
@@ -133,14 +274,36 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
     if !app.status.is_empty() {
         spans.push(Span::styled(format!("  {}", app.status), fg(theme::ORANGE)));
     }
-    f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::new().bg(theme::BAR_BG)),
-        area,
-    );
-    f.render_widget(
-        Paragraph::new(Span::styled("? help ", fg(theme::PINK))).alignment(Alignment::Right),
-        area,
-    );
+    // Right side: progress (only with a known length and room) then the help hint.
+    // On Search the letters are text, so it shows the F-keys.
+    let search = app.screen == Screen::Search;
+    let hint = match (area.width >= 70 && app.status.is_empty(), search) {
+        (true, true) => "F3 settings · F4 history · F1 help ",
+        (true, false) => "S settings · H history · ? help ",
+        (false, true) => "F1 help ",
+        (false, false) => "? help ",
+    };
+    let mut right = vec![Span::styled(hint, fg(theme::PINK))];
+    if let (Some(d), true) = (app.player.duration, area.width >= 60) {
+        let time = format!("{} / {}  ", mmss(app.player.position), mmss(d));
+        right.insert(
+            0,
+            Span::styled(
+                format!("{} {time}", bar(app.player.position / d.max(1.0), 10)),
+                fg(theme::CYAN),
+            ),
+        );
+    }
+    let rw = right.iter().map(Span::width).sum::<usize>() as u16;
+    let [left, right_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(rw)]).areas(area);
+    // Truncate the title with … so it never runs into the right side (1 col gap).
+    let other: usize = spans.iter().skip(2).map(Span::width).sum::<usize>() + spans[0].width();
+    let room = (left.width as usize).saturating_sub(other + 1);
+    spans[1] = Span::styled(fit(text, room), fg(color));
+    f.render_widget(Block::new().style(Style::new().bg(theme::BAR_BG)), area);
+    f.render_widget(Paragraph::new(Line::from(spans)), left);
+    f.render_widget(Paragraph::new(Line::from(right)), right_area);
 }
 
 fn draw_list(
@@ -166,7 +329,7 @@ fn draw_list(
             .take(app.page)
             .map(|(i, t)| {
                 let sel = i == app.selected;
-                let channel = fit(&t.channel, 24);
+                let channel = fit(&t.channel, 28);
                 // 3 marker + 3 index + 2 gap columns; the channel always stays visible.
                 let room = (inner.width as usize).saturating_sub(8 + channel.chars().count());
                 let marker = match (sel, app.player.now_playing.as_deref() == Some(&t.title)) {
@@ -195,6 +358,14 @@ fn draw_list(
     f.render_widget(List::new(items), inner);
 }
 
+/// History entry as a list row: the channel column shows the short link and resume time.
+fn history_row(e: &Entry) -> Track {
+    Track {
+        channel: format!("youtu.be/{} {}", e.track.id, mmss(e.position_secs as f64)),
+        ..e.track.clone()
+    }
+}
+
 /// Truncate to `n` chars with an ellipsis.
 fn fit(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
@@ -203,34 +374,140 @@ fn fit(s: &str, n: usize) -> String {
     s.chars().take(n.saturating_sub(1)).chain(['…']).collect()
 }
 
-fn draw_help(f: &mut Frame, area: Rect) {
-    let head = |s| Line::styled(s, fg(theme::YELLOW).bold());
+/// Help sections: commands are grouped by name; any enabled command not named here lands in "Other".
+const GROUPS: [(&str, &[&str]); 4] = [
+    (
+        "Playback",
+        &[
+            "play",
+            "pause",
+            "skip",
+            "prev",
+            "seek_back",
+            "seek_forward",
+            "volume_up",
+            "volume_down",
+            "shuffle",
+            "loop",
+        ],
+    ),
+    ("Queue", &["queue"]),
+    ("Navigation", &["search", "playlists"]),
+    ("Screens", &["history", "settings", "help", "quit"]),
+];
+
+/// Navigation and screen keys that are not commands.
+const NAV_KEYS: [(&str, &str); 10] = [
+    ("j/k ↓/↑", "move down / up in a list (scroll in Help)"),
+    ("PgDn/Up", "move one page in a list"),
+    ("g / G", "jump to the first / last row"),
+    ("Enter", "run the search, or play the highlighted row"),
+    (
+        "Esc",
+        "go back: Search to results, overlays to prior screen",
+    ),
+    ("Tab", "on Search: back to the results list"),
+    ("F1", "help (same as ?)"),
+    ("F2", "playlists, also while typing a search"),
+    ("F3", "settings (same as S), also while typing a search"),
+    ("F4", "history (same as H), also while typing a search"),
+];
+
+fn help_lines() -> Vec<Line<'static>> {
+    let head = |s: &str| Line::styled(s.to_owned(), fg(theme::YELLOW).bold());
     let key = |k: String, d: String| {
         Line::from(vec![
             Span::styled(format!("{k:>8}  "), theme::title()),
             Span::styled(d, fg(theme::CYAN)),
         ])
     };
-    let mut lines = vec![head("Commands"), Line::raw("")];
-    for c in commands::enabled() {
-        lines.push(key(
+    let cmds = commands::enabled();
+    let mut lines = vec![Line::styled(
+        "Esc, ? or q closes this screen; j/k PgUp/PgDn scroll.",
+        theme::dim(),
+    )];
+    let line = |c: &commands::Command| {
+        key(
             commands::key_label(c.key),
             format!("{}: {}", c.name, c.description),
-        ));
+        )
+    };
+    for (title, names) in GROUPS {
+        let rows: Vec<_> = cmds.iter().filter(|c| names.contains(&c.name)).collect();
+        if !rows.is_empty() {
+            lines.push(head(title));
+            lines.extend(rows.into_iter().map(line));
+        }
     }
-    lines.extend([
-        Line::raw(""),
-        head("Navigation (lists)"),
-        key("j / ↓".into(), "move down".into()),
-        key("k / ↑".into(), "move up".into()),
-        key("PgDn/Up".into(), "move one page".into()),
-        key("g / G".into(), "jump to first / last".into()),
-        key("P".into(), "your playlists (Enter opens one)".into()),
-        Line::raw(""),
-        Line::styled("Esc, ? or q closes this screen.", theme::dim()),
-    ]);
+    let known = |c: &&commands::Command| GROUPS.iter().any(|(_, n)| n.contains(&c.name));
+    let other: Vec<_> = cmds.iter().filter(|c| !known(c)).collect();
+    if !other.is_empty() {
+        lines.push(head("Other"));
+        lines.extend(other.into_iter().map(line));
+    }
+    lines.push(head("Keys"));
+    lines.extend(NAV_KEYS.map(|(k, d)| key(k.into(), d.into())));
+    lines
+}
+
+fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
+    let lines = help_lines();
+    let rows = area.height.saturating_sub(2) as usize;
+    let max = lines.len().saturating_sub(rows) as u16;
+    app.help_scroll = app.help_scroll.min(max);
+    let title = if max > 0 {
+        "Help · scroll with j/k"
+    } else {
+        "Help"
+    };
     f.render_widget(
-        Paragraph::new(lines).block(theme::panel("Help", theme::PINK)),
+        Paragraph::new(lines)
+            .scroll((app.help_scroll, 0))
+            .block(theme::panel(title, theme::PINK)),
+        area,
+    );
+}
+
+fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
+    let room = (area.width as usize).saturating_sub(24);
+    let path = app
+        .history_path
+        .as_ref()
+        .map_or_else(|| "(none)".into(), |p| fit(&p.display().to_string(), room));
+    let n = app.history.len();
+    let clear = if app.confirm_clear {
+        "Enter again to confirm".to_owned()
+    } else {
+        format!("Enter ({n} track{})", if n == 1 { "" } else { "s" })
+    };
+    let row = |r: Row, label: &str, value: String| {
+        let sel = Row::ALL[app.setting_row] == r;
+        let line = Line::from(vec![
+            Span::styled(if sel { " ▶ " } else { "   " }, fg(theme::PINK)),
+            Span::styled(format!("{label:<14}"), fg(theme::YELLOW)),
+            Span::styled(value, fg(theme::CYAN)),
+        ]);
+        if sel {
+            line.style(theme::selected())
+        } else {
+            line
+        }
+    };
+    let lines = vec![
+        row(
+            Row::Volume,
+            "Volume",
+            format!("{}%  (←/→ or -/+ changes it by 5)", app.player.volume),
+        ),
+        row(Row::HistoryFile, "History file", path),
+        Line::styled(
+            "                change: env TERMUSIC_HISTORY or `history_path` in settings.json",
+            theme::dim(),
+        ),
+        row(Row::ClearHistory, "Clear history", clear),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).block(theme::panel("Settings · j/k move · Esc back", theme::GREEN)),
         area,
     );
 }
@@ -252,17 +529,190 @@ mod tests {
     }
 
     #[test]
+    fn cassette_shows_when_roomy_hides_when_small_and_spins() {
+        use unicode_width::UnicodeWidthStr;
+        let text = |l: &[Line]| l.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let (a, b) = (text(&cassette_lines(0, "x")), text(&cassette_lines(1, "x")));
+        assert_ne!(a, b);
+        assert_eq!(a, text(&cassette_lines(theme::REEL_FRAMES.len(), "x")));
+        assert!(a.iter().all(|l| !l.contains('@') && !l.contains('#')));
+        assert!(a.iter().any(|l| l.contains(" x ")));
+        let w = a[0].width();
+        assert!(a.iter().all(|l| l.width() == w));
+
+        let mut app = App::blank();
+        app.screen = Screen::Search;
+        assert!(render(&mut app, 80, 30).contains("[_____]"));
+        for (w, h) in [(80, 8), (20, 30), (1, 1), (80, 3)] {
+            assert!(!render(&mut app, w, h).contains("[_____]"), "{w}x{h}");
+        }
+        app.screen = Screen::Results;
+        assert!(render(&mut app, 80, 40).contains("[_____]"));
+        assert!(!render(&mut app, 80, 20).contains("[_____]"));
+    }
+
+    #[test]
     fn help_fits_80x24() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Help;
         let s = render(&mut a, 80, 24);
         assert!(s.contains("closes this screen"), "help clipped");
-        assert!(s.contains("Open the search prompt"));
+        for want in [
+            "Playback",
+            "play: Play the highlighted track",
+            "pause: Pause or resume",
+        ] {
+            assert!(s.contains(want), "{want}");
+        }
+        assert!(!s.contains("Keys")); // the rest scrolls
+    }
+
+    #[test]
+    fn help_lists_every_command_and_key_when_scrolled() {
+        let mut a = App::blank();
+        a.screen = Screen::Help;
+        let mut all = String::new();
+        for scroll in [0, 8, 16, 24, u16::MAX] {
+            a.help_scroll = scroll;
+            all += &render(&mut a, 80, 24);
+        }
+        for c in commands::enabled() {
+            assert!(all.contains(&format!("{}: ", c.name)), "{}", c.name);
+            assert!(all.contains(c.description), "{}", c.name);
+        }
+        for g in ["Playback", "Queue", "Navigation", "Screens"] {
+            assert!(all.contains(g), "{g}");
+        }
+        for k in [
+            "Esc", "Tab", "F1", "F2", "F3", "F4", "PgDn/Up", "g / G", "Enter",
+        ] {
+            assert!(all.contains(k), "{k}");
+        }
+        assert!(a.help_scroll < 32, "scroll is clamped");
+    }
+
+    #[test]
+    fn search_and_results_hints() {
+        let mut a = App::blank();
+        a.screen = Screen::Search;
+        assert!(render(&mut a, 80, 24).contains("Esc: quit"));
+        a.results = vec![Track {
+            title: "t".into(),
+            channel: String::new(),
+            id: "i".into(),
+        }];
+        assert!(render(&mut a, 80, 24).contains("Esc/Tab: back to results"));
+        a.screen = Screen::Results;
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains("/ or Esc: search") && s.contains("S settings · H history"));
+        a.screen = Screen::Search; // letters are text there: the hint names the F-keys
+        assert!(render(&mut a, 80, 24).contains("F3 settings · F4 history"));
+    }
+
+    #[test]
+    fn settings_and_history_render() {
+        let mut a = App::blank();
+        a.screen = Screen::Settings;
+        let s = render(&mut a, 80, 24);
+        for w in [
+            "Volume",
+            "History file",
+            "TERMUSIC_HISTORY",
+            "Clear history",
+        ] {
+            assert!(s.contains(w), "{w}");
+        }
+        a.screen = Screen::History;
+        assert!(render(&mut a, 80, 24).contains("nothing here yet"));
+        crate::history::push(
+            &mut a.history,
+            Track {
+                title: "Old song".into(),
+                channel: "Chan".into(),
+                id: "o".into(),
+            },
+        );
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains("Old song") && s.contains("youtu.be/"));
+        a.screen = Screen::Settings;
+        a.history_path = Some("/very/long/".repeat(20).into());
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains("1 track)") && s.contains("…"));
+    }
+
+    #[test]
+    fn bars_and_time() {
+        assert_eq!(bar(0.5, 10), "█████░░░░░");
+        assert_eq!(bar(2.0, 4), "████");
+        assert_eq!(bar(-1.0, 4), "░░░░");
+        assert_eq!(mmss(75.9), "01:15");
+        assert_eq!(mmss(-3.0), "00:00");
+    }
+
+    #[test]
+    fn volume_keeps_panel_corner_and_title_clear_of_progress() {
+        let mut a = App::blank();
+        a.screen = Screen::Help;
+        let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        t.draw(|f| draw(f, &mut a)).unwrap();
+        assert_eq!(t.backend().buffer()[(79, 0)].symbol(), "╮");
+        assert!(render(&mut a, 80, 24).contains("70%"));
+        a.player.now_playing = Some("T".repeat(120));
+        a.player.duration = Some(100.0);
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains("…") && s.contains("00:00 / 01:40"));
+    }
+
+    #[test]
+    fn volume_and_progress_render() {
+        let mut a = App::blank();
+        a.player.volume = 80;
+        a.player.position = 65.0;
+        a.player.duration = Some(185.0);
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains("♪ ████████░░  80%"), "volume");
+        assert!(s.contains("01:05 / 03:05") && s.contains("help"));
+        let s = render(&mut a, 50, 24); // narrow: no progress
+        assert!(!s.contains("01:05") && s.contains("80%"));
+        let s = render(&mut a, 30, 24); // tiny: no volume, no panic
+        assert!(!s.contains("80%"));
+        render(&mut a, 40, 1);
+    }
+
+    #[test]
+    fn bar_shows_shuffle_and_loop_mode() {
+        let mut a = App::blank();
+        assert!(!render(&mut a, 80, 24).contains(theme::ICON_LOOP));
+        a.queue.toggle_shuffle();
+        a.queue.looping = Loop::One;
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains(theme::ICON_SHUFFLE));
+        assert!(s.contains(theme::ICON_LOOP_ONE));
+    }
+
+    #[test]
+    fn up_next_line_shows_three_and_hides_on_help_or_short() {
+        let mut a = App::blank();
+        a.screen = Screen::Results;
+        assert!(!render(&mut a, 80, 24).contains("next:"));
+        for n in ["one", "two", "three", "four"] {
+            a.queue.add(Track {
+                title: n.into(),
+                channel: String::new(),
+                id: n.into(),
+            });
+        }
+        assert!(render(&mut a, 80, 24).contains("next: one · two · three"));
+        assert!(!render(&mut a, 80, 24).contains("four"));
+        assert!(!render(&mut a, 80, 11).contains("next:"));
+        render(&mut a, 10, 12); // narrow must not panic
+        a.screen = Screen::Help;
+        assert!(!render(&mut a, 80, 24).contains("next:"));
     }
 
     #[test]
     fn long_titles_keep_channel_visible() {
-        let mut a = App::new();
+        let mut a = App::blank();
         a.screen = Screen::Results;
         a.results = vec![Track {
             title: "x".repeat(200),
@@ -271,5 +721,60 @@ mod tests {
         }];
         assert!(render(&mut a, 80, 24).contains("Artist"));
         render(&mut a, 20, 5); // tiny terminal must not panic
+    }
+
+    #[test]
+    fn login_hint_fully_visible_on_search() {
+        let mut a = App::blank();
+        a.screen = Screen::Search;
+        a.status = crate::app::LOGIN_HINT.into();
+        let s = render(&mut a, 80, 24);
+        assert!(s.contains(crate::app::LOGIN_HINT) && s.contains("F1 help"));
+    }
+
+    #[test]
+    fn history_rows_show_link_and_resume_time() {
+        let e = Entry {
+            track: Track {
+                title: "Old".into(),
+                channel: "Chan".into(),
+                id: "abc123".into(),
+            },
+            position_secs: 83,
+        };
+        assert_eq!(history_row(&e).channel, "youtu.be/abc123 01:23");
+        let mut app = App::blank();
+        app.screen = Screen::History;
+        app.history = vec![e];
+        let out = render(&mut app, 80, 24);
+        assert!(out.contains("Old") && out.contains("youtu.be/abc123 01:23"));
+        render(&mut app, 30, 6);
+    }
+
+    #[test]
+    fn fit_truncates_with_ellipsis() {
+        assert_eq!(fit("abc", 3), "abc");
+        assert_eq!(fit("abcd", 3), "ab…");
+        assert_eq!(fit("世界世界", 3), "世界…");
+        assert_eq!(fit("abc", 0), "…");
+        assert_eq!(fit("", 0), "");
+    }
+
+    #[test]
+    fn list_draws_rows_and_never_panics_when_tiny() {
+        let mut app = App::blank();
+        app.screen = Screen::Results;
+        app.results = (0..5)
+            .map(|i| Track {
+                title: format!("song{i}"),
+                channel: "chan".into(),
+                id: i.to_string(),
+            })
+            .collect();
+        let out = render(&mut app, 80, 24);
+        assert!(out.contains("song0") && out.contains("song4"));
+        for (w, h) in [(1, 1), (3, 3), (10, 2), (80, 4)] {
+            render(&mut app, w, h);
+        }
     }
 }

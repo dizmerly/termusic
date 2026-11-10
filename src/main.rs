@@ -1,9 +1,13 @@
 mod app;
 mod auth;
+mod cmd;
 mod commands;
 mod config;
+mod history;
 mod net;
 mod player;
+mod queue;
+mod settings;
 mod theme;
 mod ui;
 mod youtube;
@@ -70,5 +74,6 @@ fn run_tui() -> Result<()> {
         Ok(())
     })();
     ratatui::restore();
+    app.shutdown();
     res
 }

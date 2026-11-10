@@ -1,10 +1,17 @@
-//! Command registry. Each submodule declares `ENABLED`, `NAME`, `KEY`, `DESCRIPTION`.
+//! Command registry. Each submodule declares `ENABLED`, `REQUIRES_LOGIN`, `NAME`, `KEY`, `DESCRIPTION`.
 pub mod help;
+pub mod history;
 pub mod loop_track;
 pub mod pause;
 pub mod play;
+pub mod playlists;
+pub mod prev;
+pub mod queue;
 pub mod quit;
 pub mod search;
+pub mod seek_back;
+pub mod seek_forward;
+pub mod settings;
 pub mod shuffle;
 pub mod skip;
 pub mod volume_down;
@@ -14,25 +21,33 @@ pub mod volume_up;
 pub struct Command {
     pub name: &'static str,
     pub key: char,
+    pub requires_login: bool,
     pub description: &'static str,
 }
 
 macro_rules! entry {
     ($($m:ident),*) => {
-        [$((($m::ENABLED), Command { name: $m::NAME, key: $m::KEY, description: $m::DESCRIPTION })),*]
+        [$((($m::ENABLED), Command { name: $m::NAME, key: $m::KEY, requires_login: $m::REQUIRES_LOGIN, description: $m::DESCRIPTION })),*]
     };
 }
 
-fn all() -> [(bool, Command); 10] {
+fn all() -> [(bool, Command); 17] {
     entry!(
         play,
+        playlists,
         pause,
         skip,
+        prev,
+        queue,
         shuffle,
         loop_track,
         volume_up,
         volume_down,
+        seek_back,
+        seek_forward,
         search,
+        history,
+        settings,
         help,
         quit
     )
@@ -41,6 +56,11 @@ fn all() -> [(bool, Command); 10] {
 /// True if `key` belongs to a command whose `ENABLED` flag is off.
 pub fn disabled(key: char) -> bool {
     all().iter().any(|(on, c)| !on && c.key == key)
+}
+
+/// True if `key` belongs to a command that needs a signed-in user.
+pub fn requires_login(key: char) -> bool {
+    all().iter().any(|(_, c)| c.requires_login && c.key == key)
 }
 
 /// All enabled commands, in display order.
@@ -66,7 +86,25 @@ mod tests {
     fn every_enabled_command_is_listed_once() {
         let keys: Vec<_> = super::enabled().iter().map(|c| c.key).collect();
         assert!(keys.contains(&'p') && !super::disabled('p'));
-        assert_eq!(keys.len(), 10);
-        assert!(keys.contains(&'l'));
+        assert_eq!(keys.len(), 17);
+        assert!(super::requires_login('P') && !super::requires_login('p'));
+        assert!(keys.contains(&'S') && keys.contains(&'H'));
+        assert!(keys.contains(&'l') && keys.contains(&',') && keys.contains(&'.'));
+    }
+
+    #[test]
+    fn names_and_keys_are_unique_and_labelled() {
+        let all = super::enabled();
+        let mut keys: Vec<_> = all.iter().map(|c| c.key).collect();
+        let mut names: Vec<_> = all.iter().map(|c| c.name).collect();
+        keys.sort_unstable();
+        names.sort_unstable();
+        keys.dedup();
+        names.dedup();
+        assert_eq!((keys.len(), names.len()), (all.len(), all.len()));
+        assert!(all.iter().all(|c| !c.description.is_empty()));
+        assert_eq!(super::all().len(), all.len()); // nothing is switched off today
+        assert_eq!(super::key_label('\n'), "Enter");
+        assert_eq!(super::key_label('p'), "p");
     }
 }

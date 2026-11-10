@@ -1,3 +1,4 @@
 /target
 .DS_Store
 client_secret*.json
+/scripts

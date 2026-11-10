@@ -6,7 +6,7 @@ use serde_json::Value;
 const API: &str = "https://www.googleapis.com/youtube/v3/";
 
 /// A video, or (for `playlists()`) a playlist whose `id` is the playlist id.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Track {
     pub title: String,
     pub channel: String,
@@ -190,5 +190,15 @@ mod tests {
             ("Song", "Artist")
         );
         assert_eq!(t[1].channel, "");
+    }
+
+    #[test]
+    fn unescape_handles_every_entity_once() {
+        assert_eq!(
+            unescape("&quot;a&quot; &#39;b&#39; &lt;c&gt; &amp;"),
+            "\"a\" 'b' <c> &"
+        );
+        assert_eq!(unescape("&amp;lt;"), "&lt;"); // amp last: no double decoding
+        assert_eq!(unescape("plain"), "plain");
     }
 }
