@@ -13,12 +13,12 @@ pub enum Loop {
 }
 
 impl Loop {
-    /// Off -> All -> One -> Off.
+    /// Off -> One -> All -> Off (the first press repeats the song).
     pub fn cycle(self) -> Self {
         match self {
-            Loop::Off => Loop::All,
-            Loop::All => Loop::One,
-            Loop::One => Loop::Off,
+            Loop::Off => Loop::One,
+            Loop::One => Loop::All,
+            Loop::All => Loop::Off,
         }
     }
 }
@@ -485,9 +485,9 @@ mod tests {
 
     #[test]
     fn loop_cycles() {
-        assert_eq!(Loop::Off.cycle(), Loop::All);
-        assert_eq!(Loop::All.cycle(), Loop::One);
-        assert_eq!(Loop::One.cycle(), Loop::Off);
+        assert_eq!(Loop::Off.cycle(), Loop::One);
+        assert_eq!(Loop::One.cycle(), Loop::All);
+        assert_eq!(Loop::All.cycle(), Loop::Off);
     }
 
     #[test]

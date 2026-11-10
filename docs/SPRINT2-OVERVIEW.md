@@ -62,3 +62,13 @@ Work on the items in `SPRINT1-OVERVIEW.md` ("My thoughts"). Sonnet implements, a
 - `sync_preload` test now has a real stale case (`Player::fake_preload` test hook, a `sleep` stands in for mpv): preload "b" is dropped when the queue has no next track.
 - Cassette width tests use `unicode_width` display width.
 - **History shows link and resume time.** Each History row's right column is `youtu.be/<id> mm:ss` (the resume point) instead of the channel; the channel column cap is 28 for all lists. Deviation: History no longer shows the channel name.
+
+
+
+## Found bugs
+1. whenever the headphones are disconnected, the fact that the music player is paused isnt reflected in the TUI, and you have to press 'p' again which goes to the pause icon, which means that its incorrectly describing the behavior of the song. There should be some sort of test that runs whenever 'p' is pressed so that it doesnt blindly swap the boolean, but rather checks for whether the song is actually playing or whether it is paused, and set the correct icon for the behavior (that is if its paused and the icon is potentially showing "playing", pressing p should just unpause the song, since the true state is paused, (not what the tui shows))
+2. Looping doesnt actually loop. 
+
+### Status (2026-11-10)
+1. **Fixed.** mpv is now the source of truth: its `pause` property is read in the once-a-second poll, and `p` reads the real state and sets the opposite explicitly. Checked live by pausing mpv from outside the app; a real headphone disconnect was not tested.
+2. **Fixed.** Looping itself worked; the first press of `l` selected "loop the whole queue", so the next song played. The order is now off -> this track -> whole queue, and the status bar says which mode is on.

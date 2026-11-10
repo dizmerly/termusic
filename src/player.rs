@@ -30,7 +30,7 @@ pub struct Player {
     /// Preloaded next track: paused, volume 0, own socket.
     next: Option<Running>,
     /// Id of the last preload attempt, so a dead preload is not retried for the same track.
-    tried: Option<String>,
+    pub(crate) tried: Option<String>,
     fade: Option<Fade>,
     /// Counter for distinct socket names.
     spawned: u32,
@@ -241,6 +241,12 @@ impl Player {
         }
     }
 
+    /// Drop a preload the queue no longer wants; unlike a dead one, it may be wanted again.
+    pub fn drop_preload(&mut self) {
+        self.discard_preload();
+        self.tried = None;
+    }
+
     /// Abort a fade: the preload goes back to paused and silent, the current track to full volume.
     fn cancel_fade(&mut self) {
         if self.fade.take().is_some() {
@@ -270,6 +276,7 @@ impl Player {
         self.set_current(n);
         if let Some(r) = self.current.as_mut() {
             r.started = Instant::now(); // an exit right after promotion is a failure
+            r.polled = r.started; // just unpaused: an immediate poll could still read "paused"
         }
         self.vol_synced = true;
         true
@@ -300,19 +307,31 @@ impl Player {
             .map_or(Ok(()), |r| ipc_to(&r.sock, cmd))
     }
 
+    /// Flip mpv's real pause state (it may have paused itself, e.g. headphones unplugged).
     pub fn toggle_pause(&mut self) -> Result<()> {
-        self.ipc(r#"["cycle","pause"]"#)?;
-        if self.current.is_some() {
-            self.playing = !self.playing;
-        }
+        let Some(r) = self.current.as_mut() else {
+            return Ok(());
+        };
+        let paused = poll(&r.sock).2.unwrap_or(!self.playing);
+        // A poll right after the write can still read the old value: wait a full interval.
+        r.polled = Instant::now();
+        self.ipc(&pause_json(!paused))?;
+        self.sync_pause(!paused);
+        Ok(())
+    }
+
+    /// Follow mpv's pause state: the `playing` flag, the preload and a running fade stay in step.
+    fn sync_pause(&mut self, paused: bool) {
+        self.playing = !paused;
         if let (Some(f), Some(n)) = (self.fade.as_mut(), &self.next) {
-            let _ = ipc_to(&n.sock, r#"["cycle","pause"]"#); // both stay in step
+            let _ = ipc_to(&n.sock, &pause_json(paused));
             match f.paused_at.take() {
-                Some(at) => f.start += at.elapsed(), // resume: the pause did not count
-                None => f.paused_at = Some(Instant::now()),
+                Some(at) if !paused => f.start += at.elapsed(), // resume: the pause did not count
+                Some(at) => f.paused_at = Some(at),
+                None if paused => f.paused_at = Some(Instant::now()),
+                None => {}
             }
         }
-        Ok(())
     }
 
     /// Change the volume by `delta` points (clamped); the new value sticks even if mpv isn't ready.
@@ -349,12 +368,15 @@ impl Player {
         if r.mpv.try_wait().ok().flatten().is_none() {
             if r.polled.elapsed() >= Duration::from_secs(1) {
                 r.polled = Instant::now();
-                let (pos, dur) = poll(&r.sock);
+                let (pos, dur, paused) = poll(&r.sock);
                 if let Some(p) = pos {
                     self.position = p;
                 }
                 if dur.is_some() {
                     self.duration = dur;
+                }
+                if let Some(p) = paused.filter(|&p| p == self.playing) {
+                    self.sync_pause(p); // paused or resumed outside the app
                 }
                 // First answer means the socket exists: re-send a volume set before it did.
                 if (pos.is_some() || dur.is_some()) && !self.vol_synced {
@@ -384,8 +406,7 @@ impl Player {
             self.cancel_fade();
         }
         if left > PRELOAD_SECS && self.next.is_some() {
-            self.discard_preload();
-            self.tried = None; // may preload again once near the end
+            self.drop_preload(); // may preload again once near the end
         }
     }
 
@@ -457,40 +478,46 @@ fn wrap(mut mpv: Child, sock: PathBuf, id: &str, title: &str) -> Result<Running>
     }
 }
 
-/// Query `time-pos` and `duration` in one round trip; short timeouts so the UI never stalls.
-fn poll(sock: &std::path::Path) -> (Option<f64>, Option<f64>) {
+/// Query `time-pos`, `duration` and `pause` in one round trip; short timeouts so the UI never stalls.
+fn poll(sock: &std::path::Path) -> (Option<f64>, Option<f64>, Option<bool>) {
     let t = Duration::from_millis(30);
     let Ok(mut s) = UnixStream::connect(sock) else {
-        return (None, None);
+        return (None, None, None);
     };
     let _ = s.set_read_timeout(Some(t));
     let _ = s.set_write_timeout(Some(t));
     let req = r#"{"command":["get_property","time-pos"],"request_id":1}
 {"command":["get_property","duration"],"request_id":2}
+{"command":["get_property","pause"],"request_id":3}
 "#;
     if s.write_all(req.as_bytes()).is_err() {
-        return (None, None);
+        return (None, None, None);
     }
     let mut lines = Vec::new();
     for l in BufReader::new(s).lines().take(8) {
         let Ok(l) = l else { break };
-        let done = l.contains("\"request_id\":2");
+        let done = l.contains("\"request_id\":3");
         lines.push(l);
         if done {
             break;
         }
     }
-    (parse_reply(&lines, 1), parse_reply(&lines, 2))
+    let paused = reply(&lines, 3).and_then(|v| v["data"].as_bool());
+    (parse_reply(&lines, 1), parse_reply(&lines, 2), paused)
 }
 
 /// The numeric `data` of the reply with `request_id == id`; events and errors give `None`.
 fn parse_reply<S: AsRef<str>>(lines: &[S], id: u64) -> Option<f64> {
+    reply(lines, id).and_then(|v| v["data"].as_f64())
+}
+
+/// The successful reply with `request_id == id`.
+fn reply<S: AsRef<str>>(lines: &[S], id: u64) -> Option<serde_json::Value> {
     lines
         .iter()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.as_ref()).ok())
         .find(|v| v["request_id"] == id)
         .filter(|v| v["error"] == "success")
-        .and_then(|v| v["data"].as_f64())
 }
 
 /// Detach a child from the terminal: no stdin/stdout/stderr.
@@ -655,6 +682,42 @@ mod tests {
     }
 
     #[test]
+    fn promoted_track_is_not_polled_right_away() {
+        let (sock, seen, stop) = mock_mpv("promo", true);
+        let mut p = Player::new(80);
+        p.set_current(wrap(sleeper("60"), temp_sock("promo-c"), "c", "c").unwrap());
+        let mut n = wrap(sleeper("60"), sock, "n", "n").unwrap();
+        n.polled = Instant::now() - Duration::from_secs(2); // spawned long ago as a preload
+        p.next = Some(n);
+        assert!(p.promote("n"));
+        wait_until(|| seen.lock().unwrap().iter().any(|l| l.contains("pause")));
+        let before = seen.lock().unwrap().len();
+        p.tick(); // a poll now could read the stale "paused" and flip the state back
+        assert!(p.playing && seen.lock().unwrap().len() == before);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        p.stop();
+    }
+
+    #[test]
+    fn dropped_preload_may_be_wanted_again_but_discard_keeps_tried() {
+        let mut p = Player::new(80);
+        let r = fake(&mut p, "a", "60");
+        p.set_current(r);
+        p.duration = Some(100.0);
+        p.position = 90.0;
+        p.preload(&Track {
+            id: "b".into(),
+            title: "b".into(),
+            channel: String::new(),
+        });
+        p.discard_preload(); // dead-preload path: no retry
+        assert!(!p.wants_preload("b"));
+        p.drop_preload(); // queue changed: wanted again
+        assert!(p.wants_preload("b"));
+        p.stop();
+    }
+
+    #[test]
     fn step_fade_ramps_and_completes() {
         let (mut p, [lc, ln]) = rig("step");
         start_fade(&mut p, 2.0);
@@ -684,11 +747,113 @@ mod tests {
         let (mut p, [lc, ln]) = rig("pause");
         start_fade(&mut p, 1.0);
         p.toggle_pause().unwrap();
-        assert!(drain(&lc).contains("cycle") && drain(&ln).contains("cycle"));
+        assert!(drain(&lc).contains(&pause_json(true)) && drain(&ln).contains(&pause_json(true)));
         assert!(!p.playing);
         assert_eq!(p.step_fade(), None); // frozen
         p.toggle_pause().unwrap();
         assert!(p.fade.as_ref().unwrap().paused_at.is_none());
+        p.stop();
+    }
+
+    #[test]
+    fn external_pause_freezes_the_fade_and_resume_releases_it() {
+        let (mut p, [_lc, ln]) = rig("extpause");
+        start_fade(&mut p, 1.0);
+        p.sync_pause(true); // what the poll does when mpv paused itself
+        assert!(!p.playing && p.fade.as_ref().unwrap().paused_at.is_some());
+        assert!(drain(&ln).contains(&pause_json(true)));
+        assert_eq!(p.step_fade(), None);
+        p.sync_pause(false);
+        assert!(p.playing && p.fade.as_ref().unwrap().paused_at.is_none());
+        assert!(drain(&ln).contains(&pause_json(false)));
+        p.stop();
+    }
+
+    /// mpv stand-in that answers polls (`pause` = `paused`) and records every line it receives.
+    /// Ready before the call, never panics on a closed peer; stops when the flag is set.
+    fn mock_mpv(
+        tag: &str,
+        paused: bool,
+    ) -> (
+        PathBuf,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use std::sync::{Arc, Mutex, atomic::AtomicBool, atomic::Ordering};
+        let (l, sock) = listener(tag);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (seen2, stop2) = (seen.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                let Ok((mut s, _)) = l.accept() else {
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                };
+                s.set_nonblocking(false).unwrap();
+                let mut r = std::io::BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if !r.read_line(&mut line).is_ok_and(|n| n > 0) {
+                        break;
+                    }
+                    seen2.lock().unwrap().push(line.trim().to_owned());
+                    let data = if line.contains("\"pause\"") && line.contains("get_property") {
+                        paused.to_string()
+                    } else {
+                        "1.0".into()
+                    };
+                    let id = line.split("request_id\":").nth(1).unwrap_or("0").trim();
+                    let id = id.trim_end_matches('}');
+                    let _ = s.write_all(
+                        format!("{{\"data\":{data},\"request_id\":{id},\"error\":\"success\"}}\n")
+                            .as_bytes(),
+                    );
+                }
+            }
+        });
+        (sock, seen, stop)
+    }
+
+    #[test]
+    fn toggle_pause_acts_on_mpvs_real_state_not_the_local_flag() {
+        let (sock, seen, stop) = mock_mpv("tp", true);
+        let mut p = Player::new(80);
+        p.set_current(wrap(sleeper("60"), sock, "c", "c").unwrap());
+        assert!(p.playing); // the app thinks it plays; mpv is really paused
+        p.current.as_mut().unwrap().polled = Instant::now() - Duration::from_secs(2);
+        p.toggle_pause().unwrap();
+        assert!(p.playing); // resumed, not "paused"
+        wait_until(|| {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("set_property"))
+        });
+        let sent = seen.lock().unwrap().join(" ");
+        assert!(
+            sent.contains(&pause_json(false)) && !sent.contains("cycle"),
+            "{sent}"
+        );
+        // The poll right after a write could read the old value: it must wait.
+        let before = seen.lock().unwrap().len();
+        p.tick();
+        assert!(p.playing && seen.lock().unwrap().len() == before);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        p.stop();
+    }
+
+    #[test]
+    fn tick_follows_an_external_pause() {
+        let (sock, _seen, stop) = mock_mpv("ext", true);
+        let mut p = Player::new(80);
+        p.set_current(wrap(sleeper("60"), sock, "c", "c").unwrap());
+        assert!(p.playing);
+        p.current.as_mut().unwrap().polled = Instant::now() - Duration::from_secs(2);
+        p.tick();
+        assert!(!p.playing); // mpv paused itself: the flag follows
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
         p.stop();
     }
 
@@ -902,16 +1067,16 @@ mod tests {
     }
 
     #[test]
-    fn poll_reads_position_and_duration_and_tolerates_a_dead_socket() {
+    fn poll_reads_position_duration_pause_and_tolerates_a_dead_socket() {
         let (p, h) = serve(
             "poll",
-            "{\"event\":\"x\"}\n{\"data\":1.5,\"request_id\":1,\"error\":\"success\"}\n{\"data\":200.0,\"request_id\":2,\"error\":\"success\"}\n",
+            "{\"event\":\"x\"}\n{\"data\":1.5,\"request_id\":1,\"error\":\"success\"}\n{\"data\":200.0,\"request_id\":2,\"error\":\"success\"}\n{\"data\":true,\"request_id\":3,\"error\":\"success\"}\n",
         );
-        assert_eq!(poll(&p), (Some(1.5), Some(200.0)));
+        assert_eq!(poll(&p), (Some(1.5), Some(200.0), Some(true)));
         assert!(h.join().unwrap().contains("time-pos"));
         assert_eq!(
             poll(&std::env::temp_dir().join("termusic-none")),
-            (None, None)
+            (None, None, None)
         );
     }
 

@@ -3,4 +3,4 @@ pub const ENABLED: bool = true;
 pub const REQUIRES_LOGIN: bool = false;
 pub const NAME: &str = "loop";
 pub const KEY: char = 'l';
-pub const DESCRIPTION: &str = "Cycle loop: off / all / one (l for loop).";
+pub const DESCRIPTION: &str = "Cycle loop: off / this track / whole queue (l for loop).";

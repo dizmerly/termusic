@@ -73,3 +73,8 @@ Plan: `~/.claude/plans/optimized-launching-eagle.md`. Each item: 3 iterations (c
 
 ## Package D: cassette, test sweep (sprint-3 overnight)
 - Base cassette art on the Search screen (swap `theme::CASSETTE`), 129 tests after a per-function sweep, honest note on the missing menu bar widget code. Details and the covered/skipped table in `docs/SPRINT2-OVERVIEW.md`.
+
+## Bug fixes after sprint 3 (2026-11-10)
+- Pause state follows mpv: the once-a-second poll also reads mpv's `pause` property, so a pause from outside the app (headphones unplugged) shows within about a second; `p` reads the real state and sends an explicit `set_property pause`, never a blind toggle. The poll clock is reset after `p` and after a preload is promoted, so a stale read cannot flip the state back.
+- Loop order is now off -> this track (↻1) -> whole queue (↻); one press of `l` repeats the current song, and the status bar names the mode. Before, the first press selected "whole queue", which looked like no looping on a 30-track queue.
+- Verified live in a pty against a real mpv: external pause shows the pause icon, `p` resumes it, `l` once sets `loop-file=inf` and the track wraps at its end with one mpv. Not verified: a real headphone disconnect; loop-one on a live stream (no fixed end).

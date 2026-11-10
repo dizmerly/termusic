@@ -320,8 +320,9 @@ impl App {
     /// Keep the background preload matching the queue: drop a stale one, start one near the end.
     fn sync_preload(&mut self) {
         let want = self.queue.peek_next().cloned();
-        if self.player.preloaded_id() != want.as_ref().map(|t| t.id.as_str()) {
-            self.player.discard_preload(); // skip, prev, shuffle, loop or a new queue changed it
+        let loaded = self.player.preloaded_id();
+        if loaded.is_some() && loaded != want.as_ref().map(|t| t.id.as_str()) {
+            self.player.drop_preload(); // skip, prev, shuffle, loop or a new queue changed it
         }
         if let Some(t) = want.filter(|t| self.player.wants_preload(&t.id)) {
             self.player.preload(&t);
@@ -389,6 +390,12 @@ impl App {
             }
             Cmd::CycleLoop => {
                 self.queue.looping = self.queue.looping.cycle();
+                self.status = match self.queue.looping {
+                    Loop::One => "loop: this track",
+                    Loop::All => "loop: whole queue",
+                    Loop::Off => "loop: off",
+                }
+                .into();
                 self.player.set_loop_file(self.queue.looping == Loop::One)
             }
         };
@@ -853,9 +860,13 @@ mod tests {
         assert_eq!(a.selected, 1);
         press(&mut a, KeyCode::Char('s'));
         assert!(a.queue.shuffle);
-        for want in [Loop::All, Loop::One, Loop::Off] {
+        for (want, text) in [
+            (Loop::One, "loop: this track"),
+            (Loop::All, "loop: whole queue"),
+            (Loop::Off, "loop: off"),
+        ] {
             press(&mut a, KeyCode::Char('l'));
-            assert_eq!(a.queue.looping, want);
+            assert_eq!((a.queue.looping, a.status.as_str()), (want, text));
         }
         press(&mut a, KeyCode::Char('?'));
         assert_eq!(a.screen, Screen::Help);
@@ -970,7 +981,7 @@ mod tests {
         assert!(a.queue.current().is_none() && a.player.now_playing.is_none());
         a.dispatch(Cmd::ToggleShuffle);
         a.dispatch(Cmd::CycleLoop);
-        assert!(a.queue.shuffle && a.queue.looping == Loop::All);
+        assert!(a.queue.shuffle && a.queue.looping == Loop::One);
     }
 
     #[test]
@@ -1310,6 +1321,17 @@ mod tests {
         assert_eq!(a.player.preloaded_id(), Some("b"));
         a.sync_preload();
         assert!(a.player.preloaded_id().is_none());
+    }
+
+    #[test]
+    fn dropping_a_preload_for_loop_one_lets_it_be_wanted_again() {
+        let mut a = app();
+        a.queue.set(vec![track("a"), track("b")], 0);
+        a.player.fake_preload("b");
+        a.player.tried = Some("b".into()); // as `preload` records it
+        a.queue.looping = Loop::One; // `l`: no next track, the preload goes
+        a.sync_preload();
+        assert!(a.player.preloaded_id().is_none() && a.player.tried.is_none());
     }
 
     #[test]

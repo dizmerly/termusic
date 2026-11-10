@@ -53,7 +53,7 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 | `n` | Next track |
 | `b` | Back to the previous track (the current one plays next; stops at the first track) |
 | `s` | Toggle shuffle |
-| `l` | Cycle loop: off / all (↻) / one (↻1) |
+| `l` | Cycle loop: off / one (↻1) / all (↻) |
 | `+` / `-` | Volume up / down |
 | `,` / `.` | Seek back / forward 5s |
 | `/` | New search |
