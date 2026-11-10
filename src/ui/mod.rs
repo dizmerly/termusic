@@ -29,7 +29,7 @@ enum Tier {
 fn tier(w: u16, h: u16) -> Tier {
     if w >= 76 && h >= 22 {
         Tier::Deck
-    } else if w >= 38 && h >= 30 {
+    } else if w >= 38 && h >= 31 {
         Tier::Pocket
     } else {
         Tier::Compact
@@ -373,8 +373,9 @@ mod tests {
         assert_eq!(tier(76, 22), Tier::Deck);
         assert_eq!(tier(75, 40), Tier::Pocket);
         assert_eq!(tier(76, 21), Tier::Compact);
-        assert_eq!(tier(38, 30), Tier::Pocket);
-        assert_eq!(tier(37, 30), Tier::Compact);
+        assert_eq!(tier(38, 31), Tier::Pocket);
+        assert_eq!(tier(38, 30), Tier::Compact);
+        assert_eq!(tier(37, 31), Tier::Compact);
         assert_eq!(tier(60, 29), Tier::Compact);
         assert_eq!(tier(0, 0), Tier::Compact);
     }
@@ -402,14 +403,19 @@ mod tests {
         );
         assert!(r.iter().any(|l| l.contains("Never Gonna Give")));
         assert!(r.iter().any(|l| l.contains("072  ━") && l.contains("1:12")));
-        assert!(
-            r.iter()
-                .any(|l| l.contains("│◀◀ ││ ▶ ││▮▮ ││▶▶ ││ ⤮ ││↻1 │"))
-        );
-        assert!(
-            r.iter()
-                .any(|l| l.contains("└─b─┘└─p─┘└─p─┘└─n─┘└─s─┘└─l─┘"))
-        );
+        // Play, shuffle and loop are latched down; the rest stand on their shadows.
+        let keys = r.iter().position(|l| l.contains("│◀◀ │")).unwrap() - 1;
+        for (i, want) in [
+            "┌───┐     ┌───┐┌───┐          ",
+            "│◀◀ │┌───┐│▮▮ ││▶▶ │┌───┐┌───┐",
+            "└─b─┘│ ▶ │└─p─┘└─n─┘│ ⤮ ││↻1 │",
+            " ▀▀▀ └─p─┘ ▀▀▀  ▀▀▀ └─s─┘└─l─┘",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(r[keys + i].contains(want), "{}", r[keys + i]);
+        }
         assert!(r[22].contains("queued: Take On Me")); // status pinned to the pane bottom
         assert_eq!(
             r[1],
@@ -476,6 +482,7 @@ mod tests {
                 (30, 6),
                 (37, 30),
                 (38, 30),
+                (38, 31),
                 (40, 1),
                 (60, 16),
                 (75, 21),
@@ -577,10 +584,10 @@ mod tests {
         let strip = r.iter().position(|l| l.contains("1 RESULTS")).unwrap();
         assert!(top < strip && 34 - strip >= 11, "J-card keeps 10+ rows");
         assert!(r.iter().any(|l| l.contains("└─b─┘")));
-        let r = rows(&mut a, 38, 30); // narrowest pocket: the volume bar goes, the rest fits
+        let r = rows(&mut a, 38, 31); // narrowest pocket: the volume bar goes, the rest fits
         assert!(r[0].contains("⤮ ↻1 ── VOL 70% ─╮") && r[0].starts_with("╭─ TERMUSIC"));
         let strip = r.iter().position(|l| l.contains("1 RESULTS")).unwrap();
-        assert_eq!(29 - strip, 10, "J-card rows above the bottom border");
+        assert_eq!(30 - strip, 10, "J-card rows above the bottom border");
         assert!(r[strip - 1].contains("queued: Take On Me"));
         assert!(r.iter().any(|l| l.contains("└─b─┘")));
         a.status.clear();
@@ -767,7 +774,7 @@ mod tests {
         assert!(top.contains("⤮ ↻1") && top.contains("VOL ▮▮▮▮▮▮▮▮▮▮ 100% ─╮"));
         a.queue.looping = Loop::All;
         assert!(rows(&mut a, 80, 24)[0].contains("⤮ ↻ ──"));
-        let top = rows(&mut a, 38, 30)[0].clone();
+        let top = rows(&mut a, 38, 31)[0].clone();
         assert!(
             top.starts_with("╭─ TERMUSIC") && top.ends_with("100% ─╮"),
             "{top}"
@@ -922,6 +929,21 @@ mod tests {
             let mut a = playing();
             a.searching = true;
             show("Deck, search focused", &mut a, w, h);
+        }
+        let mut a = playing();
+        a.status.clear();
+        a.anim.pressed = Some((crate::anim::Key::Next, a.anim.now));
+        show("Deck, n held down (momentary press)", &mut a, 80, 24);
+        for (ms, name) in [
+            (80, "eject, 2 rows up"),
+            (280, "insert, 2 rows in"),
+            (500, "seat, whirring"),
+        ] {
+            let mut a = playing();
+            a.status.clear();
+            let at = a.anim.now - std::time::Duration::from_millis(ms);
+            a.anim.swap = Some((at, "Take On Me".into(), "a-ha".into()));
+            show(&format!("Deck, tape swap {name}"), &mut a, 80, 24);
         }
         show("Pocket, playing", &mut playing(), 60, 34);
         show("Compact, playing", &mut playing(), 60, 16);

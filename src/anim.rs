@@ -10,6 +10,44 @@ const REEL_EVERY: u64 = 3;
 const WHIRR: Duration = Duration::from_millis(400);
 /// A counter digit that just changed is drawn dim this long.
 const BLINK: Duration = Duration::from_millis(100);
+/// A momentary key press holds the cap down this long.
+const PRESS: Duration = Duration::from_millis(150);
+/// The eject phase of a tape swap, skipped when there is no old tape.
+const EJECT_MS: u64 = 200;
+/// Label rows slide one row per this many ms.
+const ROW_MS: u64 = 40;
+
+/// The transport key caps, left to right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Key {
+    Prev,
+    Play,
+    Pause,
+    Next,
+    Shuffle,
+    Loop,
+}
+
+/// Where a tape swap is. Milestone 3 hides the label art during `Eject` and `Insert`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// The old label has slid up this many rows (0..5).
+    Eject(usize),
+    /// This many rows of the new label have slid in from the top (0..5).
+    Insert(usize),
+    /// Full label, hubs whirring.
+    Seat,
+}
+
+/// The swap phase `ms` into the sequence; `None` once it is over (600 ms).
+pub fn swap_phase(ms: u64) -> Option<Phase> {
+    match ms {
+        0..200 => Some(Phase::Eject((ms / ROW_MS) as usize)),
+        200..400 => Some(Phase::Insert(((ms - 200) / ROW_MS) as usize)),
+        400..600 => Some(Phase::Seat),
+        _ => None,
+    }
+}
 
 /// Hub steps between frame numbers `prev` and `now`: every frame while whirring, else every
 /// `REEL_EVERY` frames (counted on the frame clock, so the pace does not depend on the loop).
@@ -32,6 +70,11 @@ pub struct Anim {
     /// The time this frame is drawn at; set by `advance`.
     pub now: Instant,
     pub whirr: Option<Instant>,
+    pub pressed: Option<(Key, Instant)>,
+    /// Running tape swap: when it started and the old label (title, channel).
+    pub swap: Option<(Instant, String, String)>,
+    /// The label in the deck (title, channel): the old label of the next swap.
+    pub shown: Option<(String, String)>,
     /// Hub steps so far; advances only while the tape moves, so a paused hub holds its glyph.
     pub reel: usize,
     /// Frame number at the last `advance`.
@@ -47,6 +90,9 @@ impl Anim {
             start: now,
             now,
             whirr: None,
+            pressed: None,
+            swap: None,
+            shown: None,
             reel: 0,
             frame: 0,
             count: 0,
@@ -59,12 +105,45 @@ impl Anim {
     }
 
     pub fn whirring(&self) -> bool {
-        self.whirr.is_some_and(|t| self.since(t) < WHIRR)
+        self.whirr.is_some_and(|t| self.since(t) < WHIRR) || self.phase() == Some(Phase::Seat)
     }
 
     /// A timed effect (not plain playback) is still running.
     pub fn busy(&self) -> bool {
-        self.whirring()
+        self.whirring() || self.pressed_key().is_some() || self.phase().is_some()
+    }
+
+    /// The cap held down by a momentary press.
+    pub fn pressed_key(&self) -> Option<Key> {
+        self.pressed
+            .filter(|&(_, t)| self.since(t) < PRESS)
+            .map(|(k, _)| k)
+    }
+
+    pub fn phase(&self) -> Option<Phase> {
+        let (t, _, _) = self.swap.as_ref()?;
+        swap_phase(self.since(*t).as_millis() as u64)
+    }
+
+    /// A new tape (`label`) goes in at `now`; with `animate` it plays the swap sequence. The
+    /// label still in view is the one ejected: mid-eject that is the old one, else `shown`.
+    pub fn swap_to(&mut self, label: (String, String), animate: bool, now: Instant) {
+        let ejecting = matches!(self.phase(), Some(Phase::Eject(_)));
+        let old = match self.swap.take() {
+            Some((_, t, c)) if ejecting => Some((t, c)),
+            _ => self.shown.take(),
+        };
+        self.shown = Some(label);
+        if animate {
+            self.swap = Some(match old {
+                Some((t, c)) => (now, t, c),
+                None => (
+                    now - Duration::from_millis(EJECT_MS),
+                    String::new(),
+                    String::new(),
+                ),
+            });
+        }
     }
 
     /// Move to `now`: spin the hubs if the tape moves and note which counter digits changed.
@@ -129,6 +208,59 @@ mod tests {
         assert_eq!(a.reel, 10);
         a.advance(t0 + ms(2000), false, 0);
         assert_eq!(a.reel, 10);
+        assert!(!a.busy());
+    }
+
+    #[test]
+    fn swap_phases_by_time() {
+        let p = |n| swap_phase(n);
+        assert_eq!(p(0), Some(Phase::Eject(0)));
+        assert_eq!(p(39), Some(Phase::Eject(0)));
+        assert_eq!(p(40), Some(Phase::Eject(1)));
+        assert_eq!(p(199), Some(Phase::Eject(4)));
+        assert_eq!(p(200), Some(Phase::Insert(0)));
+        assert_eq!(p(399), Some(Phase::Insert(4)));
+        assert_eq!(p(400), Some(Phase::Seat));
+        assert_eq!(p(599), Some(Phase::Seat));
+        assert_eq!(p(600), None);
+    }
+
+    #[test]
+    fn swap_ejects_the_label_in_view() {
+        let t0 = Instant::now();
+        let lab = |s: &str| (s.to_owned(), format!("{s} ch"));
+        let mut a = Anim::new(t0);
+        a.swap_to(lab("one"), true, t0); // first tape: no eject
+        a.now = t0;
+        assert_eq!(a.phase(), Some(Phase::Insert(0)));
+        a.now = t0 + ms(300); // seated; the next swap ejects "one"
+        assert_eq!(a.phase(), Some(Phase::Seat));
+        assert!(a.whirring() && a.busy());
+        a.swap_to(lab("two"), true, a.now);
+        assert_eq!(a.swap.as_ref().unwrap().1, "one");
+        assert_eq!(a.phase(), Some(Phase::Eject(0)));
+        a.now += ms(100); // mid-eject "one" is still in view: it stays the old label
+        a.swap_to(lab("three"), true, a.now);
+        assert_eq!(a.swap.as_ref().unwrap().1, "one");
+        assert_eq!(a.shown, Some(lab("three")));
+        a.now += ms(600);
+        assert_eq!(a.phase(), None);
+        assert!(!a.busy());
+        a.swap_to(lab("four"), false, a.now); // animations off: no sequence, label tracked
+        assert!(a.swap.is_none() && a.shown == Some(lab("four")));
+    }
+
+    #[test]
+    fn a_press_holds_the_cap_150_ms() {
+        let t0 = Instant::now();
+        let mut a = Anim::new(t0);
+        a.pressed = Some((Key::Next, t0));
+        assert_eq!(a.pressed_key(), Some(Key::Next));
+        assert!(a.busy());
+        a.now = t0 + ms(149);
+        assert_eq!(a.pressed_key(), Some(Key::Next));
+        a.now = t0 + ms(150);
+        assert_eq!(a.pressed_key(), None);
         assert!(!a.busy());
     }
 

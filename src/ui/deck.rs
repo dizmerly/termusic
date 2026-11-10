@@ -1,6 +1,7 @@
 //! The deck pane: cassette, tape counter and transport keys. The drawing functions are
 //! pure (shell and plain values in, lines out) so they test without a terminal.
 use super::{clean, fit, pad, wrap};
+use crate::anim::{Key, Phase};
 use crate::app::{App, Screen};
 use crate::commands;
 use crate::queue::Loop;
@@ -17,13 +18,14 @@ use unicode_width::UnicodeWidthStr;
 /// Width of the deck pane.
 pub const PANE_W: u16 = 36;
 /// Cassette, blank, counter, meter row, keys.
-const STACK_H: u16 = 18;
+const STACK_H: u16 = 19;
 /// Rows the deck takes in the Pocket tier: the stack without the blank row, plus the status
-/// row, so a 30-row terminal leaves the J-card 10 rows.
+/// row, so a 31-row terminal leaves the J-card 10 rows.
 pub const POCKET_H: u16 = STACK_H;
 /// Cassette width; the counter row matches it.
 const CASSETTE_W: usize = 34;
 const LABEL_W: usize = 28;
+const LABEL_H: usize = 5;
 /// Columns kept for the thumbnail on the label (milestone 3): 10 x 5 cells.
 const ART_W: usize = 10;
 
@@ -39,6 +41,9 @@ pub struct CassetteView<'a> {
     pub loaded: bool,
     /// Leave the label's left 10 x 5 cells for the thumbnail.
     pub art: bool,
+    /// A tape swap in progress, and the label (title, channel) being ejected.
+    pub phase: Option<Phase>,
+    pub old: (&'a str, &'a str),
 }
 
 /// The cassette: 12 rows of exactly 34 columns.
@@ -54,7 +59,22 @@ pub fn cassette(s: &Shell, v: &CassetteView) -> Vec<Line<'static>> {
         Line::styled(format!("╭{}╮", "─".repeat(32)), f),
         Line::styled(format!("│ ┌{}┐ │", "─".repeat(LABEL_W)), f),
     ];
-    out.extend(label(s, v).into_iter().map(|l| edge(l.spans)));
+    let empty = Line::from(Span::styled(" ".repeat(LABEL_W), Style::new().bg(s.body)));
+    let rows = match v.phase {
+        Some(Phase::Eject(k)) => {
+            let old = CassetteView {
+                title: v.old.0,
+                channel: v.old.1,
+                loaded: true,
+                phase: None,
+                ..*v
+            };
+            slide(label(s, &old), k, empty)
+        }
+        Some(Phase::Insert(k)) => slide(label(s, v), LABEL_H.saturating_sub(k), empty),
+        _ => label(s, v),
+    };
+    out.extend(rows.into_iter().map(|l| edge(l.spans)));
     out.push(Line::styled(format!("│ └{}┘ │", "─".repeat(LABEL_W)), f));
     out.push(Line::styled(format!("│     ╭{}╮     │", "─".repeat(20)), f));
     let mut win = vec![Span::styled("│     │", f)];
@@ -112,6 +132,18 @@ pub fn label(s: &Shell, v: &CassetteView) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// Label rows moved up by `offset`: row `i` shows `rows[i + offset]`, or `empty` past the end.
+/// Eject slides the old label up (offset 0..5); insert brings the new one down (offset 5..0).
+pub fn slide(rows: Vec<Line<'static>>, offset: usize, empty: Line<'static>) -> Vec<Line<'static>> {
+    (0..rows.len())
+        .map(|i| {
+            rows.get(i + offset)
+                .cloned()
+                .unwrap_or_else(|| empty.clone())
+        })
+        .collect()
+}
+
 /// Tape pack beside a hub, 3 cells read from the outside in: `level / 2` full cells next to
 /// the hub and a half cell outside them when the level is odd.
 pub fn pack(level: usize) -> String {
@@ -138,7 +170,11 @@ pub fn levels(v: &CassetteView) -> (usize, usize) {
 /// The 20-column reel window: two 9-column reels and a 2-column gap.
 fn window(s: &Shell, v: &CassetteView) -> Vec<Span<'static>> {
     let bg = Style::new().bg(s.body);
-    let (l, r) = levels(v);
+    // Out of the deck mid-swap: bare hubs.
+    let (l, r) = match v.phase {
+        Some(Phase::Eject(_) | Phase::Insert(_)) => (0, 0),
+        _ => levels(v),
+    };
     let frame = |n: usize| theme::REEL_FRAMES[n % theme::REEL_FRAMES.len()];
     let reel = |level: usize, hub: char| {
         let side = pack(level);
@@ -191,13 +227,16 @@ pub fn counter_row(
     Line::from(spans)
 }
 
-/// Six 5 x 3 transport key caps, 30 columns: prev, play, pause, next, shuffle, loop.
+/// Six 5 x 3 transport key caps in 4 rows of 30 columns: prev, play, pause, next, shuffle,
+/// loop. An up cap sits in rows 1-3 over a shadow; a down cap (latched by its state, or
+/// `pressed` for a moment) sits in rows 2-4, lit.
 pub fn key_caps(
     s: &Shell,
     loaded: bool,
     playing: bool,
     shuffle: bool,
     looping: Loop,
+    pressed: Option<Key>,
 ) -> Vec<Line<'static>> {
     let loop_glyph = if looping == Loop::One {
         theme::ICON_LOOP_ONE
@@ -205,34 +244,56 @@ pub fn key_caps(
         theme::ICON_LOOP
     };
     let caps = [
-        ("◀◀", commands::prev::KEY, false),
-        ("▶", commands::pause::KEY, loaded && playing),
-        ("▮▮", commands::pause::KEY, loaded && !playing),
-        ("▶▶", commands::skip::KEY, false),
-        (theme::ICON_SHUFFLE, commands::shuffle::KEY, shuffle),
-        (loop_glyph, commands::loop_track::KEY, looping != Loop::Off),
+        (Key::Prev, "◀◀", commands::prev::KEY, false),
+        (Key::Play, "▶", commands::pause::KEY, loaded && playing),
+        (Key::Pause, "▮▮", commands::pause::KEY, loaded && !playing),
+        (Key::Next, "▶▶", commands::skip::KEY, false),
+        (
+            Key::Shuffle,
+            theme::ICON_SHUFFLE,
+            commands::shuffle::KEY,
+            shuffle,
+        ),
+        (
+            Key::Loop,
+            loop_glyph,
+            commands::loop_track::KEY,
+            looping != Loop::Off,
+        ),
     ];
-    let mut rows: [Vec<Span<'static>>; 3] = Default::default();
-    for (glyph, key, lit) in caps {
-        let (edge, face) = if lit {
+    let mut rows: [Vec<Span<'static>>; 4] = Default::default();
+    for (k, glyph, key, latched) in caps {
+        let down = latched || pressed == Some(k);
+        let (edge, face) = if down {
             let on = fg(s.accent).add_modifier(Modifier::BOLD);
             (on, on)
         } else {
             (fg(s.frame), fg(s.text))
         };
         let gap = 3usize.saturating_sub(glyph.width());
-        rows[0].push(Span::styled("┌───┐", edge));
-        rows[1].push(Span::styled("│", edge));
-        rows[1].push(Span::styled(
-            format!(
-                "{}{glyph}{}",
-                " ".repeat(gap / 2),
-                " ".repeat(gap - gap / 2)
-            ),
-            face,
-        ));
-        rows[1].push(Span::styled("│", edge));
-        rows[2].push(Span::styled(format!("└─{key}─┘"), edge));
+        let text = format!(
+            "{}{glyph}{}",
+            " ".repeat(gap / 2),
+            " ".repeat(gap - gap / 2)
+        );
+        let cap = [
+            vec![Span::styled("┌───┐", edge)],
+            vec![
+                Span::styled("│", edge),
+                Span::styled(text, face),
+                Span::styled("│", edge),
+            ],
+            vec![Span::styled(format!("└─{key}─┘"), edge)],
+        ];
+        let top = usize::from(down);
+        for (row, spans) in rows[top..].iter_mut().zip(cap) {
+            row.extend(spans);
+        }
+        if down {
+            rows[0].push(Span::raw("     "));
+        } else {
+            rows[3].push(Span::styled(" ▀▀▀ ", fg(s.dim)));
+        }
     }
     rows.into_iter().map(Line::from).collect()
 }
@@ -248,28 +309,28 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
         .current()
         .filter(|t| t.title == title)
         .map_or("", |t| t.channel.as_str());
+    let anim = app.settings.animations.then_some(&app.anim);
+    let swap = anim.and_then(|a| a.swap.as_ref());
     let v = CassetteView {
         title,
         channel,
         progress: p.duration.filter(|d| *d > 0.0).map(|d| p.position / d),
         // Animations off: the milestone 1 reels, one step per second of playback.
-        spin: match (app.settings.animations, p.playing) {
-            (true, _) => app.anim.reel,
-            (false, true) => p.position as usize,
-            (false, false) => 0,
+        spin: match (anim, p.playing) {
+            (Some(a), _) => a.reel,
+            (None, true) => p.position as usize,
+            (None, false) => 0,
         },
         loaded: p.now_playing.is_some(),
         art: false,
+        phase: anim.and_then(|a| a.phase()),
+        old: swap.map_or(("", ""), |(_, t, c)| (t.as_str(), c.as_str())),
     };
     let mut lines = cassette(s, &v);
     if !pocket {
         lines.push(Line::raw(""));
     }
-    let dim = if app.settings.animations {
-        app.anim.dim_digits()
-    } else {
-        [false; 3]
-    };
+    let dim = anim.map_or([false; 3], |a| a.dim_digits());
     lines.push(counter_row(
         s, p.position, p.duration, v.loaded, CASSETTE_W, dim,
     ));
@@ -280,6 +341,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
         p.playing,
         app.queue.shuffle,
         app.queue.looping,
+        anim.and_then(|a| a.pressed_key()),
     ));
 
     let top = if pocket {
@@ -338,6 +400,8 @@ mod tests {
             spin: 0,
             loaded,
             art,
+            phase: None,
+            old: ("", ""),
         }
     }
 
@@ -519,36 +583,130 @@ mod tests {
         }
     }
 
-    #[test]
-    fn key_caps_are_5_by_3_and_light_up() {
-        let s = &TPS_L2;
-        let lit = |l: &[Line], cap: usize| l[1].spans[cap * 3 + 1].style.fg == Some(s.accent);
-        for looping in [Loop::Off, Loop::One, Loop::All] {
-            let l = key_caps(s, true, true, true, looping);
-            assert_eq!(l.len(), 3);
-            assert!(l.iter().all(|r| r.width() == 30));
-            for cap in 0..6 {
-                let cell: String = l[1].spans[cap * 3..cap * 3 + 3]
+    /// Cell `cap` (5 columns) of each key row, with the color of its middle column.
+    fn caps_cell(l: &[Line], cap: usize) -> Vec<(String, Option<ratatui::style::Color>)> {
+        l.iter()
+            .map(|row| {
+                let cells: Vec<(char, Style)> = row
+                    .spans
                     .iter()
-                    .map(|sp| sp.content.as_ref())
+                    .flat_map(|sp| sp.content.chars().map(move |c| (c, sp.style)))
                     .collect();
-                assert_eq!(cell.width(), 5, "{cell}");
+                let c = &cells[cap * 5..cap * 5 + 5];
+                (c.iter().map(|x| x.0).collect(), c[2].1.fg)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn key_caps_are_5_wide_4_rows_and_press_down() {
+        let s = &TPS_L2;
+        let down = |l: &[Line], cap: usize| {
+            let c = caps_cell(l, cap);
+            let d = c[0].0 == "     ";
+            if d {
+                assert_eq!(c[1].0, "┌───┐");
+                assert!(c[2].1 == Some(s.accent) && c[3].0.starts_with("└─")); // lit while down
+            } else {
+                assert!(c[0].0 == "┌───┐" && c[2].0.starts_with("└─"));
+                assert_eq!((c[3].0.as_str(), c[3].1), (" ▀▀▀ ", Some(s.dim)));
+                assert_eq!(c[1].1, Some(s.text));
             }
-            assert_eq!(lit(&l, 5), looping != Loop::Off);
+            d
+        };
+        for looping in [Loop::Off, Loop::One, Loop::All] {
+            for pressed in [None, Some(Key::Next), Some(Key::Loop)] {
+                let l = key_caps(s, true, true, true, looping, pressed);
+                assert_eq!(l.len(), 4);
+                assert!(l.iter().all(|r| r.width() == 30));
+                assert_eq!(
+                    down(&l, 5),
+                    looping != Loop::Off || pressed == Some(Key::Loop)
+                );
+                assert_eq!(down(&l, 3), pressed == Some(Key::Next));
+            }
         }
+        let rows: Vec<String> = key_caps(s, false, false, false, Loop::One, None)
+            .iter()
+            .map(text)
+            .collect();
         assert_eq!(
-            text(&key_caps(s, false, false, false, Loop::One)[1]),
-            "│◀◀ ││ ▶ ││▮▮ ││▶▶ ││ ⤮ ││↻1 │"
+            rows,
+            [
+                "┌───┐┌───┐┌───┐┌───┐┌───┐     ",
+                "│◀◀ ││ ▶ ││▮▮ ││▶▶ ││ ⤮ │┌───┐",
+                "└─b─┘└─p─┘└─p─┘└─n─┘└─s─┘│↻1 │",
+                " ▀▀▀  ▀▀▀  ▀▀▀  ▀▀▀  ▀▀▀ └─l─┘",
+            ]
         );
-        assert_eq!(
-            text(&key_caps(s, false, false, false, Loop::Off)[2]),
-            "└─b─┘└─p─┘└─p─┘└─n─┘└─s─┘└─l─┘"
+        let all = |l: &[Line]| (0..6).map(|c| down(l, c)).collect::<Vec<_>>();
+        let l = key_caps(s, true, true, false, Loop::Off, None); // playing
+        assert_eq!(all(&l), [false, true, false, false, false, false]);
+        let l = key_caps(s, true, false, true, Loop::Off, None); // paused, shuffle on
+        assert_eq!(all(&l), [false, false, true, false, true, false]);
+        let l = key_caps(s, false, true, false, Loop::Off, Some(Key::Prev)); // nothing loaded
+        assert_eq!(all(&l), [true, false, false, false, false, false]);
+    }
+
+    #[test]
+    fn swap_slides_the_label_out_and_in() {
+        let mut v = view("New Song", Some(0.5), true, false);
+        v.channel = "New Band";
+        v.old = ("Old Song", "Old Band");
+        let label_rows = |v: &CassetteView| -> Vec<String> {
+            cassette(&TPS_L2, v)[2..7]
+                .iter()
+                .map(|l| text(l).chars().skip(3).take(LABEL_W).collect())
+                .collect()
+        };
+        let full_old = {
+            let mut o = view("Old Song", None, true, false);
+            o.channel = "Old Band";
+            label_rows(&o)
+        };
+        let full_new = label_rows(&v);
+        let blank = " ".repeat(LABEL_W);
+        v.phase = Some(Phase::Eject(0));
+        assert_eq!(label_rows(&v), full_old);
+        v.phase = Some(Phase::Eject(2)); // up two rows, the bottom two empty
+        let r = label_rows(&v);
+        assert_eq!(r[..3], full_old[2..]);
+        assert!(r[3..].iter().all(|x| *x == blank));
+        v.phase = Some(Phase::Insert(0));
+        assert!(label_rows(&v).iter().all(|x| *x == blank));
+        v.phase = Some(Phase::Insert(1)); // the label's bottom row shows at the top
+        let r = label_rows(&v);
+        assert_eq!(r[0], full_new[4]);
+        assert!(r[1..].iter().all(|x| *x == blank));
+        v.phase = Some(Phase::Insert(4));
+        assert_eq!(label_rows(&v)[..4], full_new[1..]);
+        v.phase = Some(Phase::Seat);
+        assert_eq!(label_rows(&v), full_new);
+        // Empty slot is the deck body color; mid-swap the reels are bare.
+        v.phase = Some(Phase::Insert(0));
+        let c = cassette(&TPS_L2, &v);
+        assert!(
+            c[4].spans
+                .iter()
+                .skip(1)
+                .take(1)
+                .all(|sp| sp.style.bg == Some(TPS_L2.body))
         );
-        let l = key_caps(s, true, true, false, Loop::Off); // playing
-        assert!(!lit(&l, 0) && lit(&l, 1) && !lit(&l, 2) && !lit(&l, 3) && !lit(&l, 4));
-        let l = key_caps(s, true, false, true, Loop::Off); // paused, shuffle on
-        assert!(!lit(&l, 1) && lit(&l, 2) && lit(&l, 4));
-        let l = key_caps(s, false, true, false, Loop::Off); // nothing loaded
-        assert!(!lit(&l, 1) && !lit(&l, 2));
+        assert_eq!(text(&c[9]), "│     │   (◐)        (◓)   │     │");
+        v.phase = Some(Phase::Seat);
+        assert_ne!(
+            text(&cassette(&TPS_L2, &v)[9]),
+            "│     │   (◐)        (◓)   │     │"
+        );
+        for k in 0..=9 {
+            for ph in [Phase::Eject(k), Phase::Insert(k)] {
+                v.phase = Some(ph);
+                assert!(
+                    cassette(&TPS_L2, &v)
+                        .iter()
+                        .all(|l| l.width() == CASSETTE_W)
+                );
+            }
+        }
     }
 }

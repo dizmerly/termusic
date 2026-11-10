@@ -1,5 +1,5 @@
 //! Application state and key handling.
-use crate::anim::Anim;
+use crate::anim::{Anim, Key};
 use crate::cmd::{self, Cmd, Event};
 use crate::commands;
 use crate::history::{self, Entry};
@@ -378,6 +378,9 @@ impl App {
         } else {
             0
         };
+        if p.now_playing.is_none() {
+            self.anim.shown = None; // the deck is empty: the next tape has nothing to eject
+        }
         self.anim.advance(Instant::now(), p.playing, count);
     }
 
@@ -398,6 +401,11 @@ impl App {
         match e {
             Event::TrackStarted(id) => {
                 self.playing_id = Some(id.clone());
+                let title = self.player.now_playing.clone().unwrap_or_default();
+                let channel = self.queue.current().filter(|t| t.id == id);
+                let channel = channel.map_or(String::new(), |t| t.channel.clone());
+                let animate = self.settings.animations;
+                self.anim.swap_to((title, channel), animate, Instant::now());
                 if let Some(t) = self.queue.current().filter(|t| t.id == id).cloned() {
                     history::push(&mut self.history, t);
                     self.save_history();
@@ -431,7 +439,26 @@ impl App {
         if self.settings.animations && matches!(c, Cmd::Next | Cmd::Prev | Cmd::Seek(_)) {
             self.anim.whirr = Some(Instant::now());
         }
-        let r = match c {
+        let r = self.run(c);
+        if let Err(e) = r {
+            self.status = e.to_string();
+        }
+        let key = match c {
+            Cmd::PlayPause if self.player.playing => Some(Key::Play),
+            Cmd::PlayPause => Some(Key::Pause),
+            Cmd::Next => Some(Key::Next),
+            Cmd::Prev => Some(Key::Prev),
+            Cmd::ToggleShuffle => Some(Key::Shuffle),
+            Cmd::CycleLoop => Some(Key::Loop),
+            Cmd::Seek(_) | Cmd::Volume(_) => None,
+        };
+        if let Some(k) = key.filter(|_| self.settings.animations) {
+            self.anim.pressed = Some((k, Instant::now()));
+        }
+    }
+
+    fn run(&mut self, c: Cmd) -> anyhow::Result<()> {
+        match c {
             Cmd::PlayPause => self.player.toggle_pause(),
             // Advances even on loop-one: the user asked for another track.
             Cmd::Next => {
@@ -466,9 +493,6 @@ impl App {
                 .into();
                 self.player.set_loop_file(self.queue.looping == Loop::One)
             }
-        };
-        if let Err(e) = r {
-            self.status = e.to_string();
         }
     }
 
@@ -1919,6 +1943,42 @@ mod tests {
         a.settings.animations = true;
         a.player.playing = false;
         assert!(!a.animating());
+    }
+
+    #[test]
+    fn dispatch_presses_the_cap_of_its_command() {
+        let mut a = app();
+        let key = |a: &App| a.anim.pressed.map(|(k, _)| k);
+        a.dispatch(Cmd::ToggleShuffle);
+        assert_eq!(key(&a), Some(Key::Shuffle));
+        a.dispatch(Cmd::PlayPause); // nothing loaded: stays paused, so Pause shows the press
+        assert_eq!(key(&a), Some(Key::Pause));
+        a.dispatch(Cmd::CycleLoop);
+        assert_eq!(key(&a), Some(Key::Loop));
+        a.dispatch(Cmd::Volume(5)); // no cap: the last press stays
+        assert_eq!(key(&a), Some(Key::Loop));
+        a.anim.pressed = None;
+        a.settings.animations = false;
+        a.dispatch(Cmd::ToggleShuffle);
+        assert_eq!(key(&a), None);
+    }
+
+    #[test]
+    fn track_started_swaps_the_tape() {
+        let mut a = app();
+        a.queue.set(a.results.clone(), 3);
+        a.player.now_playing = Some("3".into());
+        a.on_event(Event::TrackStarted("3".into()));
+        a.anim.now = a.anim.swap.as_ref().unwrap().0 + std::time::Duration::from_millis(200);
+        assert_eq!(a.anim.phase(), Some(crate::anim::Phase::Insert(0))); // first tape: no eject
+        assert_eq!(a.anim.shown, Some(("3".into(), String::new())));
+        a.player.now_playing = None;
+        a.tick(); // the deck emptied: nothing to eject next time
+        assert!(a.anim.shown.is_none());
+        a.settings.animations = false;
+        a.anim.swap = None;
+        a.on_event(Event::TrackStarted("3".into()));
+        assert!(a.anim.swap.is_none());
     }
 
     #[test]
