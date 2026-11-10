@@ -239,6 +239,7 @@ impl App {
 
     fn run_search(&mut self) {
         let q = self.input.trim().to_owned();
+        self.searching = false; // leave the field now: replies never move focus
         self.spawn(async move { Ok(Msg::Tracks(youtube::search(&q).await?)) });
     }
 
@@ -284,6 +285,8 @@ impl App {
             if !matches!(m, Msg::LoginUrl(_) | Msg::SaveFailed(_)) {
                 self.busy = false;
             }
+            // Replies never move focus: whoever is typing keeps typing.
+            let typing = self.searching;
             match m {
                 Msg::Online => self.on_event(Event::Connection(true)),
                 Msg::Offline => self.on_event(Event::Connection(false)),
@@ -333,6 +336,7 @@ impl App {
                     }
                 }
             }
+            self.searching = typing;
         }
         self.sync_preload();
         match self.player.tick() {
@@ -447,6 +451,9 @@ impl App {
     }
 
     fn play_selected(&mut self) {
+        if self.results.is_empty() {
+            return; // set() would clear the queue and stop playback
+        }
         self.queue.set(self.results.clone(), self.selected);
         self.play_current();
     }
@@ -543,7 +550,7 @@ impl App {
             KeyCode::F(1) => self.open(Screen::Help),
             KeyCode::F(2) => self.open_playlists(),
             KeyCode::F(3) => self.open(Screen::Settings),
-            KeyCode::F(4) => self.set_tab(Screen::History),
+            KeyCode::F(4) => self.goto_tab(3, tabs_off()),
             _ => {}
         }
     }
@@ -621,6 +628,7 @@ impl App {
     /// Leave an overlay for the screen under it.
     fn close_overlay(&mut self) {
         self.screen = self.stack.pop().unwrap_or(Screen::Results);
+        self.select(self.selected); // the list may have shrunk under the overlay
     }
 
     /// Leave every overlay.
@@ -676,8 +684,11 @@ impl App {
         }
     }
 
-    /// Switch to `TABS[i]`; the Lists tab goes through the sign-in check.
-    fn goto_tab(&mut self, i: usize) {
+    /// Switch to `TABS[i]` unless that tab is off; the Lists tab goes through the sign-in check.
+    fn goto_tab(&mut self, i: usize, off: [bool; 4]) {
+        if off[i % TABS.len()] {
+            return;
+        }
         match TABS[i % TABS.len()] {
             Screen::Playlists => self.open_playlists(),
             t => self.set_tab(t),
@@ -693,7 +704,7 @@ impl App {
             }
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') | KeyCode::F(1) => self.open(Screen::Help),
-            KeyCode::Char(commands::history::KEY) | KeyCode::F(4) => self.set_tab(Screen::History),
+            KeyCode::Char(commands::history::KEY) | KeyCode::F(4) => self.goto_tab(3, tabs_off()),
             KeyCode::Char('j') | KeyCode::Down => {
                 self.setting_row = (self.setting_row + 1).min(Row::ALL.len() - 1)
             }
@@ -744,14 +755,15 @@ impl App {
             KeyCode::PageUp => self.select(self.selected.saturating_sub(self.page)),
             KeyCode::Char('g') | KeyCode::Home => self.select(0),
             KeyCode::Char('G') | KeyCode::End => self.select(last),
-            KeyCode::Tab => self.goto_tab(tab + 1),
-            KeyCode::BackTab => self.goto_tab(tab + TABS.len() - 1),
-            KeyCode::Char(c @ '1'..='4') => self.goto_tab(c as usize - '1' as usize),
+            KeyCode::Tab => self.goto_tab(next_tab(tab, 1, tabs_off()), tabs_off()),
+            KeyCode::BackTab => self.goto_tab(next_tab(tab, 3, tabs_off()), tabs_off()),
+            KeyCode::Char(c @ '1'..='4') => self.goto_tab(c as usize - '1' as usize, tabs_off()),
             KeyCode::Enter if self.screen == Screen::Login => {
                 if !self.busy {
                     self.start_login()
                 }
             }
+            KeyCode::Enter if self.len() == 0 => {} // nothing to open or play
             KeyCode::Enter if self.screen == Screen::Playlists => {
                 if self.busy {
                     return; // never fall through to playing a stale search result
@@ -801,7 +813,7 @@ impl App {
             KeyCode::Char('a') if self.screen == Screen::Results => self.queue_selected(),
             KeyCode::Char('P') | KeyCode::F(2) => self.open_playlists(),
             KeyCode::Char(commands::settings::KEY) | KeyCode::F(3) => self.open(Screen::Settings),
-            KeyCode::Char(commands::history::KEY) | KeyCode::F(4) => self.set_tab(Screen::History),
+            KeyCode::Char(commands::history::KEY) | KeyCode::F(4) => self.goto_tab(3, tabs_off()),
             KeyCode::Esc => self.focus_search(),
             KeyCode::Char('?') | KeyCode::F(1) => self.open(Screen::Help),
             KeyCode::Char('q') => self.quit = true,
@@ -832,6 +844,24 @@ impl App {
             self.offset = self.selected + 1 - page;
         }
     }
+}
+
+/// Tabs whose command is disabled, in `TABS` order.
+fn tabs_off() -> [bool; 4] {
+    [
+        false,
+        false,
+        commands::disabled(commands::playlists::KEY),
+        commands::disabled(commands::history::KEY),
+    ]
+}
+
+/// The tab `step` places after `from` (3 = back one) that is not off; `from` if none.
+fn next_tab(from: usize, step: usize, off: [bool; 4]) -> usize {
+    (1..=TABS.len())
+        .map(|k| (from + step * k) % TABS.len())
+        .find(|&i| !off[i])
+        .unwrap_or(from)
 }
 
 #[cfg(test)]
@@ -1043,9 +1073,8 @@ mod tests {
             id: id.into(),
         };
         let mut a = app();
-        a.searching = true;
         a.tx.send(Msg::PlaylistTracks("pl".into(), vec![t("a")]))
-            .unwrap();
+            .unwrap(); // wrong screen
         a.tick();
         assert!(a.queue.current().is_none() && !a.from_playlist);
         assert_eq!(a.results.len(), 30);
@@ -1506,13 +1535,26 @@ mod tests {
     fn tracks_reply_switches_to_results_with_list_focus() {
         let mut a = app();
         press(&mut a, KeyCode::Char('4'));
-        a.searching = true;
         a.tx.send(Msg::Tracks(vec![track("n")])).unwrap();
         a.tick();
         assert_eq!(
             (a.screen, a.searching, a.selected),
             (Screen::Results, false, 0)
         );
+    }
+
+    #[test]
+    fn submitting_a_search_leaves_the_field() {
+        // Spawned tasks never run (nothing drives this runtime), so the test stays offline.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _g = rt.enter();
+        let mut a = app();
+        a.searching = true;
+        a.input = "x".into();
+        press(&mut a, KeyCode::Enter);
+        assert!(!a.searching);
     }
 
     #[test]
@@ -1584,5 +1626,193 @@ mod tests {
         let a = app(); // path() is None under test: must not touch the real config
         a.save_settings();
         a.save_history();
+    }
+
+    fn typing_app() -> App {
+        let mut a = app();
+        a.logged_in = Some(true);
+        a.screen = Screen::Playlists;
+        a.playlists = vec![track("pl")];
+        a.searching = true;
+        a.input = "ab".into();
+        a
+    }
+
+    fn still_typing(a: &mut App) {
+        assert!(a.searching && a.input == "ab");
+        press(a, KeyCode::Char('q'));
+        assert!(!a.quit && a.input == "abq");
+    }
+
+    #[test]
+    fn replies_never_take_focus_from_the_search_field() {
+        // Spawned tasks never run (nothing drives this runtime), so the test stays offline.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _g = rt.enter();
+        let mut a = typing_app();
+        a.tx.send(Msg::PlaylistTracks("pl".into(), vec![track("a")]))
+            .unwrap();
+        a.tick();
+        assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("a"));
+        still_typing(&mut a);
+        let mut a = typing_app();
+        a.tx.send(Msg::Tracks(vec![track("n")])).unwrap();
+        a.tick();
+        assert_eq!(a.screen, Screen::Results);
+        still_typing(&mut a);
+        let mut a = typing_app();
+        a.tx.send(Msg::LoggedIn).unwrap();
+        a.tick();
+        still_typing(&mut a);
+        let mut a = typing_app();
+        a.tx.send(Msg::Offline).unwrap();
+        a.tx.send(Msg::Online).unwrap();
+        a.tick();
+        still_typing(&mut a);
+    }
+
+    #[test]
+    fn enter_on_an_empty_list_does_nothing() {
+        // Spawned tasks never run (nothing drives this runtime), so the test stays offline.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _g = rt.enter();
+        for tab in ['1', '2', '3', '4'] {
+            let mut a = app();
+            a.logged_in = Some(true);
+            a.queue.set(vec![track("p")], 0);
+            a.player.now_playing = Some("p".into());
+            a.results.clear();
+            press(&mut a, KeyCode::Char(tab));
+            press(&mut a, KeyCode::Enter);
+            assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("p"));
+            assert_eq!(a.player.now_playing.as_deref(), Some("p"));
+        }
+        let mut a = app();
+        a.results.clear();
+        a.queue.set(vec![track("p")], 0);
+        a.player.now_playing = Some("p".into());
+        press(&mut a, KeyCode::Enter); // Results tab
+        assert_eq!(a.player.now_playing.as_deref(), Some("p"));
+        assert!(a.queue.current().is_some());
+    }
+
+    #[test]
+    fn typing_every_printable_char_is_text() {
+        let mut a = app();
+        a.searching = true;
+        press(&mut a, KeyCode::Esc);
+        press(&mut a, KeyCode::Char('/'));
+        let want: String = (' '..='~').collect();
+        for c in want.chars() {
+            press(&mut a, KeyCode::Char(c));
+        }
+        assert_eq!(a.input, want);
+        assert!(a.searching && !a.quit && a.screen == Screen::Results && a.status.is_empty());
+        assert!(!a.queue.shuffle && a.queue.looping == Loop::Off && !a.player.playing);
+        assert_eq!(a.player.volume, App::blank().player.volume);
+    }
+
+    #[test]
+    fn playlist_reply_must_match_the_selected_playlist() {
+        let mut a = app();
+        a.screen = Screen::Playlists;
+        a.playlists = vec![track("p0"), track("p1")];
+        a.selected = 1;
+        a.tx.send(Msg::PlaylistTracks("p0".into(), vec![track("a")]))
+            .unwrap();
+        a.tick();
+        assert!(a.queue.current().is_none() && a.screen == Screen::Playlists);
+    }
+
+    #[test]
+    fn playlists_reply_clamps_the_selection() {
+        // Spawned tasks never run (nothing drives this runtime), so the test stays offline.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _g = rt.enter();
+        let mut a = app();
+        a.logged_in = Some(true);
+        press(&mut a, KeyCode::Char('3'));
+        a.playlists = (0..9).map(|i| track(&i.to_string())).collect();
+        a.select(5);
+        a.tx.send(Msg::Playlists(vec![track("x"), track("y")]))
+            .unwrap();
+        a.tick();
+        assert_eq!(a.selected, 1);
+        let mut a = app();
+        a.playlists = (0..9).map(|i| track(&i.to_string())).collect();
+        a.tab_sel[2] = (5, 0);
+        a.tx.send(Msg::Playlists(vec![track("x"), track("y")]))
+            .unwrap();
+        a.tick();
+        a.logged_in = Some(true);
+        press(&mut a, KeyCode::Char('3'));
+        assert_eq!(a.selected, 1);
+    }
+
+    #[test]
+    fn closing_settings_after_clearing_history_clamps_selection() {
+        let mut a = app();
+        a.history = (0..10)
+            .map(|i| Entry {
+                track: track(&i.to_string()),
+                position_secs: 0,
+            })
+            .collect();
+        press(&mut a, KeyCode::Char('4'));
+        a.select(9);
+        press(&mut a, KeyCode::Char('S'));
+        a.setting_row = Row::ALL
+            .iter()
+            .position(|&r| r == Row::ClearHistory)
+            .unwrap();
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Esc);
+        assert!(a.history.is_empty() && a.screen == Screen::History);
+        assert_eq!(a.selected, 0);
+    }
+
+    #[test]
+    fn queue_jump_to_last_row_leaves_no_stale_preload() {
+        let mut a = app();
+        a.queue
+            .set(vec![track("a"), track("b"), track("c"), track("d")], 0);
+        a.player.fake_preload("b");
+        a.player.tried = Some("b".into());
+        press(&mut a, KeyCode::Char('2'));
+        a.select(3);
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("d"));
+        assert!(a.player.preloaded_id().is_none() && a.player.tried.is_none());
+        a.player.stop();
+    }
+
+    #[test]
+    fn tabs_skip_the_ones_that_are_off() {
+        let off = [false, false, true, false];
+        let visited = |step| {
+            let mut v = vec![];
+            let mut t = 0;
+            for _ in 0..3 {
+                t = next_tab(t, step, off);
+                v.push(t);
+            }
+            v
+        };
+        assert_eq!(visited(1), [1, 3, 0]);
+        assert_eq!(visited(3), [3, 1, 0]);
+        let mut a = app();
+        a.goto_tab(2, off);
+        assert_eq!(a.screen, Screen::Results);
+        a.goto_tab(3, off);
+        assert_eq!(a.screen, Screen::History);
+        assert_eq!(next_tab(1, 1, [false, true, true, true]), 0);
+        assert_eq!(next_tab(0, 1, [false, true, true, true]), 0);
     }
 }

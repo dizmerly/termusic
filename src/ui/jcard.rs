@@ -1,5 +1,5 @@
 //! The J-card pane: tab strip, search field and the active tab's list.
-use super::{fit, history_row, overlay, wrap};
+use super::{clean, fit, history_row, overlay, wrap};
 use crate::app::{App, Screen};
 use crate::theme::{self, Shell, fg};
 use crate::youtube::Track;
@@ -125,12 +125,13 @@ fn search_line(s: &Shell, app: &App, w: usize) -> Line<'static> {
 }
 
 fn query_line(s: &Shell, app: &App, w: usize) -> Line<'static> {
+    let input = clean(&app.input);
     let room = w.saturating_sub(4);
     if app.searching {
         // Show the end of a long query: that is where the typing happens.
         let mut tail: Vec<char> = Vec::new();
         let mut used = 0;
-        for c in app.input.chars().rev() {
+        for c in input.chars().rev() {
             used += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
             if used > room {
                 break;
@@ -144,12 +145,12 @@ fn query_line(s: &Shell, app: &App, w: usize) -> Line<'static> {
             Span::styled("▏", fg(s.accent)),
         ]);
     }
-    if app.input.is_empty() {
+    if input.is_empty() {
         return Line::styled(format!(" {} / to search", theme::ICON_NOTE), fg(s.dim));
     }
     Line::from(vec![
         Span::styled(format!(" {} ", theme::ICON_NOTE), fg(s.dim)),
-        Span::styled(fit(&app.input, room), fg(s.text)),
+        Span::styled(fit(&input, room), fg(s.text)),
     ])
 }
 

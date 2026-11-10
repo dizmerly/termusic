@@ -30,7 +30,7 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 ### Startup
 1. Checks connectivity. If offline, shows the **Offline** screen (`r` retries, `q` quits).
 2. Otherwise starts on the **Results** tab with the search field focused; signing in is optional.
-3. If `mpv` or `yt-dlp` can't be run, the status bar says which is missing.
+3. If `mpv` or `yt-dlp` can't be run, the status line says which is missing.
 
 ### Screens
 The window is a cassette deck: on the left the tape (title on the label, reels that wind with the track), a tape counter with progress, and transport keys that light up for play, pause, shuffle and loop; on the right the list pane, like the tape's J-card. Volume and the shuffle/loop modes sit in the top border, key hints in the bottom one. Below 76x22 the deck moves above the list (from 38x30), and smaller still the list fills the window with a one-line status bar. Colors come from the shell picked in Settings.

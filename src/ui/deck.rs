@@ -1,6 +1,6 @@
 //! The deck pane: cassette, tape counter and transport keys. The drawing functions are
 //! pure (shell and plain values in, lines out) so they test without a terminal.
-use super::{fit, pad, wrap};
+use super::{clean, fit, pad, wrap};
 use crate::app::{App, Screen};
 use crate::commands;
 use crate::queue::Loop;
@@ -286,7 +286,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
     }
     let mut color = s.accent;
     if !app.status.is_empty() {
-        status.push(app.status.clone());
+        status.push(clean(&app.status));
     } else if app.screen == Screen::History
         && !app.searching
         && let Some(e) = app.history.get(app.selected)

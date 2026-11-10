@@ -163,7 +163,10 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
     if !app.status.is_empty() {
-        spans.push(Span::styled(format!("  {}", app.status), fg(s.accent)));
+        spans.push(Span::styled(
+            format!("  {}", clean(&app.status)),
+            fg(s.accent),
+        ));
     }
     // Right side: progress (only with a known length and room), volume, then the help hint.
     // While typing the letters are text, so it shows the F-keys.
@@ -223,25 +226,35 @@ fn history_row(e: &Entry) -> Track {
     }
 }
 
-/// Truncate to `n` display columns with an ellipsis.
+/// Truncate to `n` display columns with an ellipsis (at least the ellipsis).
 fn fit(s: &str, n: usize) -> String {
     if s.width() <= n {
         return s.into();
     }
     let mut out = String::new();
-    let mut used = 0;
+    // Measure the whole prefix, as `width()` of the result will: sequences (emoji + U+FE0F) widen.
     for c in s.chars() {
-        used += c.width().unwrap_or(0);
-        if used + 1 > n {
+        out.push(c);
+        if out.width() + 1 > n {
+            out.pop();
             break;
         }
-        out.push(c);
     }
     out + "…"
 }
 
+/// Replace control characters (tabs, newlines) so text from outside draws on one line.
+fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 /// `fit`, then spaces up to exactly `n` columns (`format!` pads by chars, not columns).
 fn pad(s: &str, n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
     let t = fit(s, n);
     let w = t.width();
     t + &" ".repeat(n.saturating_sub(w))
@@ -888,5 +901,26 @@ mod tests {
         }
         show("Pocket, playing", &mut playing(), 60, 34);
         show("Compact, playing", &mut playing(), 60, 16);
+    }
+
+    #[test]
+    fn fit_and_pad_never_exceed_their_width() {
+        let nasty = [
+            "",
+            "plain text",
+            "日本語のタイトル",
+            "⚠️⚠️⚠️⚠️⚠️⚠️⚠️",
+            "👨\u{200d}👩\u{200d}👧 family",
+            "e\u{301}e\u{301}e\u{301}e\u{301}",
+            "a\tb\nc\u{7f}d\u{1b}[0m",
+            "❤️x❤️y❤️",
+        ];
+        for s in nasty {
+            for n in 0..=12 {
+                assert!(fit(s, n).width() <= n.max(1), "fit({s:?}, {n})");
+                assert_eq!(pad(s, n).width(), n, "pad({s:?}, {n})");
+            }
+        }
+        assert_eq!(clean("a\tb\nc"), "a b c");
     }
 }
