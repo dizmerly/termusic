@@ -33,6 +33,8 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 3. If `mpv` or `yt-dlp` can't be run, the status bar says which is missing.
 
 ### Screens
+The window is a cassette deck: on the left the tape (title on the label, reels that wind with the track), a tape counter with progress, and transport keys that light up for play, pause, shuffle and loop; on the right the list pane, like the tape's J-card. Volume and the shuffle/loop modes sit in the top border, key hints in the bottom one. Below 76x22 the deck moves above the list (from 38x30), and smaller still the list fills the window with a one-line status bar. Colors come from the shell picked in Settings.
+
 The list pane has four tabs (`Tab`/`Shift-Tab` or `1`-`4`); each keeps its own selection. Settings and Help open over the list.
 
 | Screen | What it does |

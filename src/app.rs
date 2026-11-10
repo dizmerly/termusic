@@ -315,6 +315,7 @@ impl App {
                             .set_upcoming(v.iter().filter(|t| t.id != id).cloned().collect());
                         self.results = v;
                         self.set_sel(Screen::Results, 0);
+                        self.set_sel(Screen::Queue, self.sel_of(Screen::Queue)); // clamp
                     }
                 }
                 Msg::Playlists(v) => {
@@ -501,7 +502,9 @@ impl App {
         if self.searching {
             return self.handle_search_key(key);
         }
-        if key.code == KeyCode::Char('/') {
+        if key.code == KeyCode::Char(commands::search::KEY)
+            && !commands::disabled(commands::search::KEY)
+        {
             return self.focus_search();
         }
         match self.screen {
@@ -1484,6 +1487,19 @@ mod tests {
         press(&mut a, KeyCode::Char('1'));
         assert_eq!(a.selected, 12);
         assert!((a.offset..a.offset + a.page).contains(&12)); // scrolled into view
+    }
+
+    #[test]
+    fn related_reply_clamps_the_queue_selection() {
+        let mut a = app();
+        a.queue.set(a.results.clone(), 0);
+        press(&mut a, KeyCode::Char('2'));
+        press(&mut a, KeyCode::Char('G'));
+        assert_eq!(a.selected, 29);
+        a.tx.send(Msg::Related("0".into(), vec![track("0"), track("r")]))
+            .unwrap();
+        a.tick();
+        assert_eq!((a.len(), a.selected), (2, 1));
     }
 
     #[test]

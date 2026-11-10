@@ -1,40 +1,11 @@
-//! Logo, icons and colors.
+//! Icons, reel frames and color shells.
 use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{Block, BorderType},
 };
 
-/// All lines must be the same width: `Paragraph` centers each line separately.
-pub const LOGO: [&str; 8] = [
-    r" _________  _______   ________  _____ ______   ___  ___  ________  ___  ________     ",
-    r"|\___   ___\\  ___ \ |\   __  \|\   _ \  _   \|\  \|\  \|\   ____\|\  \|\   ____\    ",
-    r"\|___ \  \_\ \   __/|\ \  \|\  \ \  \\\__\ \  \ \  \\\  \ \  \___|\ \  \ \  \___|    ",
-    r"     \ \  \ \ \  \_|/_\ \   _  _\ \  \\|__| \  \ \  \\\  \ \_____  \ \  \ \  \       ",
-    r"      \ \  \ \ \  \_|\ \ \  \\  \\ \  \    \ \  \ \  \\\  \|____|\  \ \  \ \  \____  ",
-    r"       \ \__\ \ \_______\ \__\\ _\\ \__\    \ \__\ \_______\____\_\  \ \__\ \_______\",
-    r"        \|__|  \|_______|\|__|\|__|\|__|     \|__|\|_______|\_________\|__|\|_______|",
-    r"                                                            \|_________|             ",
-];
-
-/// Cassette art. Keep every line the same width. `@` marks a reel hub (swapped for a
-/// spinning glyph each frame); the `#` run is the now-playing field.
-pub const CASSETTE: [&str; 13] = [
-    r#"   ____________________________ "#,
-    r#" /|............................|"#,
-    r#"| |:##########################:|"#,
-    r#"| |:                          :|"#,
-    r#"| |:     ,-.   _____   ,-.    :|"#,
-    r#"| |:    ( @)) [_____] ( @))   :|"#,
-    r#"|v|:     `-`   ' ' '   `-`    :|"#,
-    r#"|||:     ,______________.     :|"#,
-    r#"|||...../::::o::::::o::::\.....|"#,
-    r#"|^|..../:::O::::::::::O:::\....|"#,
-    r#"|/`---/--------------------`---|"#,
-    r#"`.___/ /====/ /=//=/ /====/____/"#,
-    r#"     `--------------------'     "#,
-];
 /// Frames for a spinning reel hub.
-pub const REEL_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+pub const REEL_FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
 
 pub const ICON_NOTE: &str = "♪";
 pub const ICON_PLAY: &str = "▶";
@@ -113,7 +84,7 @@ pub const AMBER: Shell = Shell {
 };
 
 /// Settings order; the first is the default.
-pub const SHELLS: [&Shell; 3] = [&SUNSET, &TPS_L2, &AMBER];
+pub const SHELLS: [&Shell; 3] = [&TPS_L2, &SUNSET, &AMBER];
 
 /// Index into `SHELLS` of the shell with this id; an unknown id gives the default.
 pub fn shell_index(id: &str) -> usize {
@@ -153,16 +124,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cassette_lines_are_equal_width() {
-        use unicode_width::UnicodeWidthStr;
-        let w = CASSETTE[0].width();
-        assert!(CASSETTE.iter().all(|l| l.width() == w));
-    }
-
-    #[test]
-    fn logo_lines_are_equal_width() {
-        let w = LOGO[0].chars().count();
-        assert!(LOGO.iter().all(|l| l.chars().count() == w));
+    fn reel_frames_are_one_column_and_tps_is_default() {
+        use unicode_width::UnicodeWidthChar;
+        assert!(REEL_FRAMES.iter().all(|c| c.width() == Some(1)));
+        assert_eq!(SHELLS[0].id, "tps-l2");
+        assert_eq!(crate::settings::Settings::default().shell, "tps-l2");
     }
 
     #[test]

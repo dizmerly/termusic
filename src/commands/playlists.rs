@@ -3,4 +3,4 @@ pub const ENABLED: bool = true;
 pub const REQUIRES_LOGIN: bool = true;
 pub const NAME: &str = "playlists";
 pub const KEY: char = 'P';
-pub const DESCRIPTION: &str = "Your playlists (F2 on Search); Enter plays one.";
+pub const DESCRIPTION: &str = "Lists tab: your playlists (F2 while typing); Enter plays one.";
