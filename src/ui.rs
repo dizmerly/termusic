@@ -2,7 +2,7 @@
 use crate::app::{App, Row, Screen};
 use crate::history::Entry;
 use crate::queue::Loop;
-use crate::theme::{self, fg};
+use crate::theme::{self, Shell, fg};
 use crate::{commands, youtube::Track};
 use ratatui::{
     Frame,
@@ -13,6 +13,7 @@ use ratatui::{
 };
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let s = app.shell();
     let show_next = app.screen != Screen::Help
         && f.area().height >= 12
         && app.queue.upcoming().next().is_some();
@@ -29,9 +30,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     ])
     .areas(f.area());
 
+    let gradient = [
+        s.frame, s.frame, s.accent, s.label, s.meter_lo, s.meter_lo, s.meter_lo, s.dim,
+    ];
     let lines: Vec<Line> = theme::LOGO
         .iter()
-        .zip(theme::LOGO_GRADIENT)
+        .zip(gradient)
         .map(|(l, c)| Line::styled(*l, fg(c).bold()))
         .collect();
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), logo);
@@ -49,48 +53,48 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Screen::Offline => msg(
             f,
             vec![
-                Line::styled("You are offline", fg(theme::ORANGE).bold()),
+                Line::styled("You are offline", fg(s.accent).bold()),
                 Line::raw("Connect to the internet to play YouTube Music."),
                 Line::from(vec![
-                    Span::styled("r", theme::title()),
+                    Span::styled("r", theme::title(s)),
                     Span::raw(" retry   "),
-                    Span::styled("q", theme::title()),
+                    Span::styled("q", theme::title(s)),
                     Span::raw(" quit"),
                 ]),
             ],
             "Offline",
-            theme::ORANGE,
+            s.accent,
         ),
         Screen::Login => {
             let lines = match &app.login_url {
                 Some(url) => vec![
                     Line::raw("Your browser should open. If not, visit:"),
-                    Line::styled(url.clone(), fg(theme::CYAN).underlined()),
-                    Line::styled("Waiting for you to sign in…", fg(theme::YELLOW)),
+                    Line::styled(url.clone(), fg(s.meter_lo).underlined()),
+                    Line::styled("Waiting for you to sign in…", fg(s.label)),
                 ],
                 None => vec![
                     Line::styled(
                         "Sign in with Google to see your playlists",
-                        fg(theme::GREEN).bold(),
+                        fg(s.meter_lo).bold(),
                     ),
                     Line::from(vec![
-                        Span::styled("Enter", theme::title()),
+                        Span::styled("Enter", theme::title(s)),
                         Span::raw(" sign in   "),
-                        Span::styled("Esc", theme::title()),
+                        Span::styled("Esc", theme::title(s)),
                         Span::raw(" back to search   "),
-                        Span::styled("q", theme::title()),
+                        Span::styled("q", theme::title(s)),
                         Span::raw(" quit"),
                     ]),
                 ],
             };
-            msg(f, lines, "Login", theme::GREEN)
+            msg(f, lines, "Login", s.meter_lo)
         }
         Screen::Search => {
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(format!("{} ", theme::ICON_NOTE), fg(theme::PINK)),
-                    Span::styled(app.input.clone(), fg(theme::YELLOW)),
-                    Span::styled("▏", fg(theme::PINK)),
+                    Span::styled(format!("{} ", theme::ICON_NOTE), fg(s.frame)),
+                    Span::styled(app.input.clone(), fg(s.label)),
+                    Span::styled("▏", fg(s.frame)),
                 ]))
                 .block(theme::panel(
                     if app.results.is_empty() {
@@ -98,7 +102,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                     } else {
                         "Search · Enter run · Esc/Tab: back to results"
                     },
-                    theme::CYAN,
+                    s.meter_lo,
                 )),
                 body,
             );
@@ -116,7 +120,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Screen::History => {
             let rows: Vec<Track> = app.history.iter().map(history_row).collect();
             let title = "History · Enter replays from where you stopped · Esc back";
-            draw_list(f, app, &rows, title, theme::YELLOW, body);
+            draw_list(f, app, &rows, title, s.label, body);
         }
         Screen::Results => {
             let title = format!(
@@ -125,12 +129,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             );
             let rows = std::mem::take(&mut app.results);
             let body = cassette_above(f, app, body);
-            draw_list(f, app, &rows, &title, theme::PURPLE, body);
+            draw_list(f, app, &rows, &title, s.dim, body);
             app.results = rows;
         }
         Screen::Playlists => {
             let rows = std::mem::take(&mut app.playlists);
-            draw_list(f, app, &rows, "Playlists · Enter plays", theme::GREEN, body);
+            draw_list(f, app, &rows, "Playlists · Enter plays", s.meter_lo, body);
             app.playlists = rows;
         }
     }
@@ -139,12 +143,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_next(f, app, next);
     }
     draw_bar(f, app, bar);
-    draw_volume(f, app.player.volume, f.area());
+    draw_volume(f, s, app.player.volume, f.area());
 }
 
 /// Cassette art with spinning reels; `spin` picks the frame (0 when idle) and
 /// `now` is the now-playing text shown on the label.
-fn cassette_lines(spin: usize, now: &str) -> Vec<Line<'static>> {
+fn cassette_lines(s: &Shell, spin: usize, now: &str) -> Vec<Line<'static>> {
     let reel = theme::REEL_FRAMES[spin % theme::REEL_FRAMES.len()].to_string();
     theme::CASSETTE
         .iter()
@@ -163,9 +167,9 @@ fn cassette_lines(spin: usize, now: &str) -> Vec<Line<'static>> {
             let mut spans = Vec::new();
             for (i, part) in l.split('@').enumerate() {
                 if i > 0 {
-                    spans.push(Span::styled(reel.clone(), fg(theme::YELLOW).bold()));
+                    spans.push(Span::styled(reel.clone(), fg(s.label).bold()));
                 }
-                spans.push(Span::styled(part.to_owned(), fg(theme::PINK)));
+                spans.push(Span::styled(part.to_owned(), fg(s.frame)));
             }
             Line::from(spans)
         })
@@ -185,7 +189,7 @@ fn draw_cassette(f: &mut Frame, app: &App, area: Rect) {
         (Some(t), false) => format!("{} {t}", theme::ICON_PAUSE),
         _ => "nothing playing".into(),
     };
-    let lines = cassette_lines(spin, &now);
+    let lines = cassette_lines(app.shell(), spin, &now);
     if area.height >= lines.len() as u16 && area.width >= lines[0].width() as u16 {
         f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
     }
@@ -214,7 +218,7 @@ fn mmss(secs: f64) -> String {
 }
 
 /// `♪ ████████░░ 80%` in the top-right corner, skipped when it would crowd the screen.
-fn draw_volume(f: &mut Frame, vol: u8, area: Rect) {
+fn draw_volume(f: &mut Frame, s: &Shell, vol: u8, area: Rect) {
     const W: u16 = 17;
     if area.width < 40 || area.height == 0 {
         return;
@@ -226,11 +230,12 @@ fn draw_volume(f: &mut Frame, vol: u8, area: Rect) {
     );
     // Inset 2 columns so a panel's corner stays intact when row 0 is its border.
     let r = Rect::new(area.right() - W - 3, area.y, W + 1, 1);
-    f.render_widget(Paragraph::new(Span::styled(text, fg(theme::PINK))), r);
+    f.render_widget(Paragraph::new(Span::styled(text, fg(s.frame))), r);
 }
 
 /// `next: A · B · C` for the next three tracks, cut to the width.
 fn draw_next(f: &mut Frame, app: &App, area: Rect) {
+    let s = app.shell();
     let titles: Vec<&str> = app
         .queue
         .upcoming()
@@ -241,14 +246,15 @@ fn draw_next(f: &mut Frame, app: &App, area: Rect) {
         &format!(" next: {}", titles.join(" · ")),
         area.width as usize,
     );
-    f.render_widget(Paragraph::new(Span::styled(text, fg(theme::CYAN))), area);
+    f.render_widget(Paragraph::new(Span::styled(text, fg(s.meter_lo))), area);
 }
 
 fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
+    let s = app.shell();
     let (icon, color, text) = match (&app.player.now_playing, app.player.playing) {
-        (Some(t), true) => (theme::ICON_PLAY, theme::GREEN, t.as_str()),
-        (Some(t), false) => (theme::ICON_PAUSE, theme::YELLOW, t.as_str()),
-        _ => (theme::ICON_NOTE, theme::PURPLE, "nothing playing"),
+        (Some(t), true) => (theme::ICON_PLAY, s.meter_lo, t.as_str()),
+        (Some(t), false) => (theme::ICON_PAUSE, s.label, t.as_str()),
+        _ => (theme::ICON_NOTE, s.dim, "nothing playing"),
     };
     let mut spans = vec![
         Span::styled(format!(" {icon} "), fg(color).bold()),
@@ -268,11 +274,11 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
     if app.busy {
         spans.push(Span::styled(
             format!("  {} working…", theme::ICON_BUSY),
-            fg(theme::CYAN),
+            fg(s.meter_lo),
         ));
     }
     if !app.status.is_empty() {
-        spans.push(Span::styled(format!("  {}", app.status), fg(theme::ORANGE)));
+        spans.push(Span::styled(format!("  {}", app.status), fg(s.accent)));
     }
     // Right side: progress (only with a known length and room) then the help hint.
     // On Search the letters are text, so it shows the F-keys.
@@ -283,14 +289,14 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
         (false, true) => "F1 help ",
         (false, false) => "? help ",
     };
-    let mut right = vec![Span::styled(hint, fg(theme::PINK))];
+    let mut right = vec![Span::styled(hint, fg(s.frame))];
     if let (Some(d), true) = (app.player.duration, area.width >= 60) {
         let time = format!("{} / {}  ", mmss(app.player.position), mmss(d));
         right.insert(
             0,
             Span::styled(
                 format!("{} {time}", bar(app.player.position / d.max(1.0), 10)),
-                fg(theme::CYAN),
+                fg(s.meter_lo),
             ),
         );
     }
@@ -301,7 +307,7 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
     let other: usize = spans.iter().skip(2).map(Span::width).sum::<usize>() + spans[0].width();
     let room = (left.width as usize).saturating_sub(other + 1);
     spans[1] = Span::styled(fit(text, room), fg(color));
-    f.render_widget(Block::new().style(Style::new().bg(theme::BAR_BG)), area);
+    f.render_widget(Block::new().style(Style::new().bg(s.body)), area);
     f.render_widget(Paragraph::new(Line::from(spans)), left);
     f.render_widget(Paragraph::new(Line::from(right)), right_area);
 }
@@ -314,13 +320,14 @@ fn draw_list(
     color: ratatui::style::Color,
     area: Rect,
 ) {
+    let s = app.shell();
     let block = theme::panel(title, color);
     let inner = block.inner(area);
     app.page = inner.height as usize;
     let items: Vec<ListItem> = if rows.is_empty() {
         vec![ListItem::new(Span::styled(
             "  nothing here yet",
-            theme::dim(),
+            theme::dim(s),
         ))]
     } else {
         rows.iter()
@@ -338,16 +345,16 @@ fn draw_list(
                     _ => "   ",
                 };
                 let item = ListItem::new(Line::from(vec![
-                    Span::styled(marker, fg(theme::PINK)),
-                    Span::styled(format!("{:>2} ", i + 1), theme::dim()),
+                    Span::styled(marker, fg(s.frame)),
+                    Span::styled(format!("{:>2} ", i + 1), theme::dim(s)),
                     Span::styled(
                         fit(&t.title, room),
-                        fg(if sel { theme::YELLOW } else { theme::CYAN }),
+                        fg(if sel { s.label } else { s.meter_lo }),
                     ),
-                    Span::styled(format!("  {channel}"), fg(theme::PURPLE)),
+                    Span::styled(format!("  {channel}"), fg(s.dim)),
                 ]));
                 if sel {
-                    item.style(theme::selected())
+                    item.style(theme::selected(s))
                 } else {
                     item
                 }
@@ -413,18 +420,18 @@ const NAV_KEYS: [(&str, &str); 10] = [
     ("F4", "history (same as H), also while typing a search"),
 ];
 
-fn help_lines() -> Vec<Line<'static>> {
-    let head = |s: &str| Line::styled(s.to_owned(), fg(theme::YELLOW).bold());
+fn help_lines(s: &Shell) -> Vec<Line<'static>> {
+    let head = |t: &str| Line::styled(t.to_owned(), fg(s.label).bold());
     let key = |k: String, d: String| {
         Line::from(vec![
-            Span::styled(format!("{k:>8}  "), theme::title()),
-            Span::styled(d, fg(theme::CYAN)),
+            Span::styled(format!("{k:>8}  "), theme::title(s)),
+            Span::styled(d, fg(s.meter_lo)),
         ])
     };
     let cmds = commands::enabled();
     let mut lines = vec![Line::styled(
         "Esc, ? or q closes this screen; j/k PgUp/PgDn scroll.",
-        theme::dim(),
+        theme::dim(s),
     )];
     let line = |c: &commands::Command| {
         key(
@@ -451,7 +458,8 @@ fn help_lines() -> Vec<Line<'static>> {
 }
 
 fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
-    let lines = help_lines();
+    let s = app.shell();
+    let lines = help_lines(app.shell());
     let rows = area.height.saturating_sub(2) as usize;
     let max = lines.len().saturating_sub(rows) as u16;
     app.help_scroll = app.help_scroll.min(max);
@@ -463,12 +471,13 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(
         Paragraph::new(lines)
             .scroll((app.help_scroll, 0))
-            .block(theme::panel(title, theme::PINK)),
+            .block(theme::panel(title, s.frame)),
         area,
     );
 }
 
 fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
+    let s = app.shell();
     let room = (area.width as usize).saturating_sub(24);
     let path = app
         .history_path
@@ -483,12 +492,12 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
     let row = |r: Row, label: &str, value: String| {
         let sel = Row::ALL[app.setting_row] == r;
         let line = Line::from(vec![
-            Span::styled(if sel { " ▶ " } else { "   " }, fg(theme::PINK)),
-            Span::styled(format!("{label:<14}"), fg(theme::YELLOW)),
-            Span::styled(value, fg(theme::CYAN)),
+            Span::styled(if sel { " ▶ " } else { "   " }, fg(s.frame)),
+            Span::styled(format!("{label:<14}"), fg(s.label)),
+            Span::styled(value, fg(s.meter_lo)),
         ]);
         if sel {
-            line.style(theme::selected())
+            line.style(theme::selected(s))
         } else {
             line
         }
@@ -499,15 +508,20 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
             "Volume",
             format!("{}%  (←/→ or -/+ changes it by 5)", app.player.volume),
         ),
+        row(
+            Row::Shell,
+            "Shell",
+            format!("{}  (←/→ changes it)", app.shell().name),
+        ),
         row(Row::HistoryFile, "History file", path),
         Line::styled(
             "                change: env TERMUSIC_HISTORY or `history_path` in settings.json",
-            theme::dim(),
+            theme::dim(s),
         ),
         row(Row::ClearHistory, "Clear history", clear),
     ];
     f.render_widget(
-        Paragraph::new(lines).block(theme::panel("Settings · j/k move · Esc back", theme::GREEN)),
+        Paragraph::new(lines).block(theme::panel("Settings · j/k move · Esc back", s.meter_lo)),
         area,
     );
 }
@@ -532,9 +546,19 @@ mod tests {
     fn cassette_shows_when_roomy_hides_when_small_and_spins() {
         use unicode_width::UnicodeWidthStr;
         let text = |l: &[Line]| l.iter().map(|l| l.to_string()).collect::<Vec<_>>();
-        let (a, b) = (text(&cassette_lines(0, "x")), text(&cassette_lines(1, "x")));
+        let (a, b) = (
+            text(&cassette_lines(&theme::SUNSET, 0, "x")),
+            text(&cassette_lines(&theme::SUNSET, 1, "x")),
+        );
         assert_ne!(a, b);
-        assert_eq!(a, text(&cassette_lines(theme::REEL_FRAMES.len(), "x")));
+        assert_eq!(
+            a,
+            text(&cassette_lines(
+                &theme::SUNSET,
+                theme::REEL_FRAMES.len(),
+                "x"
+            ))
+        );
         assert!(a.iter().all(|l| !l.contains('@') && !l.contains('#')));
         assert!(a.iter().any(|l| l.contains(" x ")));
         let w = a[0].width();
@@ -616,6 +640,7 @@ mod tests {
         let s = render(&mut a, 80, 24);
         for w in [
             "Volume",
+            "Shell",
             "History file",
             "TERMUSIC_HISTORY",
             "Clear history",

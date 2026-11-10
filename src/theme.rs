@@ -44,26 +44,96 @@ pub const ICON_LOOP: &str = "↻";
 pub const ICON_LOOP_ONE: &str = "↻1";
 pub const ICON_BUSY: &str = "⟳";
 
-pub const PINK: Color = Color::Rgb(255, 105, 180);
-pub const ORANGE: Color = Color::Rgb(255, 170, 100);
-pub const YELLOW: Color = Color::Rgb(255, 224, 120);
-pub const GREEN: Color = Color::Rgb(130, 240, 170);
-pub const CYAN: Color = Color::Rgb(100, 220, 255);
-pub const PURPLE: Color = Color::Rgb(180, 140, 255);
-pub const ROW_BG: Color = Color::Rgb(58, 42, 92);
-pub const BAR_BG: Color = Color::Rgb(30, 30, 46);
-
-/// One color per logo line, top to bottom.
-pub const LOGO_GRADIENT: [Color; 8] = [PINK, PINK, ORANGE, YELLOW, GREEN, CYAN, CYAN, PURPLE];
-
-pub fn title() -> Style {
-    Style::default().fg(PINK).add_modifier(Modifier::BOLD)
+/// A named color scheme: every color the UI draws comes from the active shell's roles.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Shell {
+    /// Shown in the UI.
+    pub name: &'static str,
+    /// Stored in settings.json.
+    pub id: &'static str,
+    pub body: Color,
+    pub frame: Color,
+    pub text: Color,
+    pub dim: Color,
+    pub accent: Color,
+    pub label: Color,
+    pub label_ink: Color,
+    pub meter_lo: Color,
+    pub meter_hi: Color,
+    pub select_bg: Color,
 }
-pub fn selected() -> Style {
-    Style::default().bg(ROW_BG).add_modifier(Modifier::BOLD)
+
+const fn rgb(hex: u32) -> Color {
+    Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
-pub fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
+
+pub const SUNSET: Shell = Shell {
+    name: "SUNSET TAPE",
+    id: "sunset",
+    body: rgb(0x1A1026),
+    frame: rgb(0xFF69B4),
+    text: rgb(0xFFE6F4),
+    dim: rgb(0x9A7FBD),
+    accent: rgb(0xFFAA64),
+    label: rgb(0xFFE078),
+    label_ink: rgb(0x3A2A5C),
+    meter_lo: rgb(0x64DCFF),
+    meter_hi: rgb(0xFF4D8D),
+    select_bg: rgb(0x3A2A5C),
+};
+
+pub const TPS_L2: Shell = Shell {
+    name: "TPS-L2",
+    id: "tps-l2",
+    body: rgb(0x16284F),
+    frame: rgb(0xB9C2D3),
+    text: rgb(0xE8ECF4),
+    dim: rgb(0x7F8FB3),
+    accent: rgb(0xFF7A1A),
+    label: rgb(0xF2E8CF),
+    label_ink: rgb(0x26221C),
+    meter_lo: rgb(0x7FD1B9),
+    meter_hi: rgb(0xFF4D3D),
+    select_bg: rgb(0x2A4687),
+};
+
+pub const AMBER: Shell = Shell {
+    name: "AMBER HI-FI",
+    id: "amber",
+    body: rgb(0x241812),
+    frame: rgb(0xC9A27A),
+    text: rgb(0xF3E3C3),
+    dim: rgb(0x94795C),
+    accent: rgb(0xFFB000),
+    label: rgb(0xEADBB8),
+    label_ink: rgb(0x3B2A1A),
+    meter_lo: rgb(0x5CFFB0),
+    meter_hi: rgb(0xFF6A3D),
+    select_bg: rgb(0x4A3423),
+};
+
+/// Settings order; the first is the default.
+pub const SHELLS: [&Shell; 3] = [&SUNSET, &TPS_L2, &AMBER];
+
+/// Index into `SHELLS` of the shell with this id; an unknown id gives the default.
+pub fn shell_index(id: &str) -> usize {
+    SHELLS.iter().position(|s| s.id == id).unwrap_or(0)
+}
+
+pub fn shell(id: &str) -> &'static Shell {
+    SHELLS[shell_index(id)]
+}
+
+pub fn title(s: &Shell) -> Style {
+    fg(s.accent).add_modifier(Modifier::BOLD)
+}
+pub fn selected(s: &Shell) -> Style {
+    Style::default()
+        .bg(s.select_bg)
+        .add_modifier(Modifier::BOLD)
+}
+pub fn dim(s: &Shell) -> Style {
+    fg(s.dim)
 }
 pub fn fg(c: Color) -> Style {
     Style::default().fg(c)
@@ -96,12 +166,24 @@ mod tests {
     }
 
     #[test]
-    fn style_helpers_use_the_palette() {
-        assert_eq!(fg(CYAN).fg, Some(CYAN));
-        assert_eq!(title().fg, Some(PINK));
-        assert!(title().add_modifier.contains(Modifier::BOLD));
-        assert_eq!(selected().bg, Some(ROW_BG));
-        assert_eq!(dim().fg, Some(Color::DarkGray));
-        let _ = panel("t", GREEN); // builds without panicking
+    fn style_helpers_use_the_shell() {
+        let s = &SUNSET;
+        assert_eq!(fg(s.text).fg, Some(s.text));
+        assert_eq!(title(s).fg, Some(s.accent));
+        assert!(title(s).add_modifier.contains(Modifier::BOLD));
+        assert_eq!(selected(s).bg, Some(s.select_bg));
+        assert_eq!(dim(s).fg, Some(s.dim));
+        let _ = panel("t", s.frame); // builds without panicking
+    }
+
+    #[test]
+    fn shells_resolve_by_id_and_unknown_falls_back() {
+        assert_eq!(rgb(0x16284F), Color::Rgb(0x16, 0x28, 0x4F));
+        for (i, s) in SHELLS.iter().enumerate() {
+            assert_eq!(shell_index(s.id), i);
+            assert_eq!(shell(s.id).name, s.name);
+        }
+        assert_eq!(shell("bogus"), SHELLS[0]);
+        assert_eq!(shell(""), SHELLS[0]);
     }
 }

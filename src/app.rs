@@ -5,6 +5,7 @@ use crate::history::{self, Entry};
 use crate::player::Player;
 use crate::queue::{Loop, Queue};
 use crate::settings::Settings;
+use crate::theme::{self, Shell};
 use crate::youtube::{self, Track};
 use crate::{auth, net};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -72,12 +73,13 @@ impl Screen {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Row {
     Volume,
+    Shell,
     HistoryFile,
     ClearHistory,
 }
 
 impl Row {
-    pub const ALL: [Row; 3] = [Row::Volume, Row::HistoryFile, Row::ClearHistory];
+    pub const ALL: [Row; 4] = [Row::Volume, Row::Shell, Row::HistoryFile, Row::ClearHistory];
 }
 
 pub struct App {
@@ -187,6 +189,19 @@ impl App {
             status: crate::player::missing_deps().unwrap_or_default(),
             quit: false,
         }
+    }
+
+    /// The color shell in use.
+    pub fn shell(&self) -> &'static Shell {
+        theme::shell(&self.settings.shell)
+    }
+
+    /// Step through `theme::SHELLS` (wrapping) and save the choice.
+    fn cycle_shell(&mut self, step: isize) {
+        let n = theme::SHELLS.len() as isize;
+        let i = (theme::shell_index(&self.settings.shell) as isize + step).rem_euclid(n);
+        self.settings.shell = theme::SHELLS[i as usize].id.into();
+        self.save_settings();
     }
 
     /// Run a network task off the UI thread; offline is detected first and reported as `Msg::Offline`.
@@ -622,6 +637,8 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => {
                 self.setting_row = self.setting_row.saturating_sub(1)
             }
+            KeyCode::Left if row == Row::Shell => self.cycle_shell(-1),
+            KeyCode::Right if row == Row::Shell => self.cycle_shell(1),
             KeyCode::Left | KeyCode::Char('-') => self.dispatch(Cmd::Volume(-cmd::STEP)),
             KeyCode::Right | KeyCode::Char('+') => self.dispatch(Cmd::Volume(cmd::STEP)),
             KeyCode::Enter if row == Row::HistoryFile => {
@@ -1141,7 +1158,10 @@ mod tests {
         );
         a.screen = Screen::Settings;
         a.stack = vec![Screen::Results];
-        a.setting_row = 2;
+        a.setting_row = Row::ALL
+            .iter()
+            .position(|&r| r == Row::ClearHistory)
+            .unwrap();
         press(&mut a, KeyCode::Enter);
         assert_eq!(history::load(&p).len(), 2); // first Enter only asks
         press(&mut a, KeyCode::Enter);
@@ -1215,6 +1235,8 @@ mod tests {
         assert_eq!(a.player.volume, 45);
         press(&mut a, KeyCode::Enter); // volume row: nothing cleared
         assert_eq!(a.history.len(), 1);
+        press(&mut a, KeyCode::Char('j'));
+        assert_eq!(Row::ALL[a.setting_row], Row::Shell);
         press(&mut a, KeyCode::Char('j'));
         assert_eq!(Row::ALL[a.setting_row], Row::HistoryFile);
         a.history_path = Some("/h.json".into());
@@ -1347,6 +1369,28 @@ mod tests {
         assert_eq!(a.settings.volume, 33);
         assert_eq!(history::load(&p).len(), 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn shell_row_cycles_both_ways_and_keeps_volume() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('S'));
+        press(&mut a, KeyCode::Char('j'));
+        assert_eq!(Row::ALL[a.setting_row], Row::Shell);
+        let first = a.settings.shell.clone();
+        press(&mut a, KeyCode::Right);
+        assert_eq!(a.settings.shell, theme::SHELLS[1].id);
+        assert_eq!(a.shell(), theme::SHELLS[1]);
+        press(&mut a, KeyCode::Left);
+        press(&mut a, KeyCode::Left); // wraps to the last
+        assert_eq!(a.settings.shell, theme::SHELLS[theme::SHELLS.len() - 1].id);
+        press(&mut a, KeyCode::Right);
+        assert_eq!(a.settings.shell, first);
+        assert_eq!(a.player.volume, crate::settings::DEFAULT_VOLUME);
+        a.settings.shell = "bogus".into(); // unknown: drawn and stepped from the default
+        assert_eq!(a.shell(), theme::SHELLS[0]);
+        press(&mut a, KeyCode::Right);
+        assert_eq!(a.settings.shell, theme::SHELLS[1].id);
     }
 
     #[test]

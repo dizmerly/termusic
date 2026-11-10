@@ -10,6 +10,8 @@ pub struct Settings {
     pub volume: u8,
     /// Where the play history lives; `None` = `history.json` next to settings.json.
     pub history_path: Option<PathBuf>,
+    /// Id of the color shell (`theme::SHELLS`); kept as written, an unknown id draws the default.
+    pub shell: String,
 }
 
 impl Default for Settings {
@@ -17,6 +19,7 @@ impl Default for Settings {
         Self {
             volume: DEFAULT_VOLUME,
             history_path: None,
+            shell: crate::theme::SHELLS[0].id.into(),
         }
     }
 }
@@ -105,17 +108,23 @@ mod tests {
         Settings {
             volume: 33,
             history_path: Some("/h.json".into()),
+            shell: "amber".into(),
         }
         .save_to(&p)
         .unwrap();
         let got = Settings::load_from(&p);
         assert_eq!((got.volume, got.history_path), (33, Some("/h.json".into())));
+        assert_eq!(got.shell, "amber");
         std::fs::write(&p, "{not json").unwrap();
         assert_eq!(Settings::load_from(&p), Settings::default()); // corrupt
         std::fs::write(&p, "{}").unwrap();
         assert_eq!(Settings::load_from(&p), Settings::default()); // missing field
         std::fs::write(&p, r#"{"volume":250}"#).unwrap();
         assert_eq!(Settings::load_from(&p).volume, 100); // clamped
+        std::fs::write(&p, r#"{"shell":"bogus"}"#).unwrap();
+        let got = Settings::load_from(&p);
+        assert_eq!(got.shell, "bogus"); // kept, so saving does not rewrite it
+        assert_eq!(crate::theme::shell(&got.shell), crate::theme::SHELLS[0]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

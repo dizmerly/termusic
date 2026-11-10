@@ -40,7 +40,7 @@ Type a query, press **Enter**, move with `j`/`k`, and press **Enter** on a track
 | Results | Scrollable list of tracks (title and channel). Text only, no thumbnails. |
 | Playlists | Your YouTube playlists (needs sign-in). `Enter` loads the playlist (first 50 tracks) as the queue, in order, and plays the first track; the list then shows it. |
 | History | The last 10 played tracks (`H`, `F4` on Search). `Enter` replays from there, resuming where you stopped, and the queue follows history order. |
-| Settings | `S` (`F3` on Search): volume (`←`/`→` or `-`/`+`), history file path (`Enter` shows how to change it), clear history (`Enter` twice). |
+| Settings | `S` (`F3` on Search): volume (`←`/`→` or `-`/`+`), color shell (`←`/`→` on its row: TPS-L2, Sunset tape, Amber hi-fi), history file path (`Enter` shows how to change it), clear history (`Enter` twice). |
 | Help | Lists every enabled command and keybinding, grouped; scrolls with `j`/`k`, `PgUp`/`PgDn`, `g`/`G`. |
 | Offline | Shown whenever a network action finds no connection. |
 
