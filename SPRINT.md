@@ -78,3 +78,9 @@ Plan: `~/.claude/plans/optimized-launching-eagle.md`. Each item: 3 iterations (c
 - Pause state follows mpv: the once-a-second poll also reads mpv's `pause` property, so a pause from outside the app (headphones unplugged) shows within about a second; `p` reads the real state and sends an explicit `set_property pause`, never a blind toggle. The poll clock is reset after `p` and after a preload is promoted, so a stale read cannot flip the state back.
 - Loop order is now off -> this track (↻1) -> whole queue (↻); one press of `l` repeats the current song, and the status bar names the mode. Before, the first press selected "whole queue", which looked like no looping on a 30-track queue.
 - Verified live in a pty against a real mpv: external pause shows the pause icon, `p` resumes it, `l` once sets `loop-file=inf` and the track wraps at its end with one mpv. Not verified: a real headphone disconnect; loop-one on a live stream (no fixed end).
+
+## Sprint 3 overhaul: The Deck (planned 2026-11-10)
+- Goal: a distinctive, easy to use termusic that fully commits to a Sony Walkman / cassette look, with animation, optional pixel-art thumbnails, and a Swift menu bar helper that controls the running app.
+- Milestones in order: (0) plan written into the repo, (1) Deck layout, shells and tabs, (2) animations and cassette hiss, (3) pixel-art thumbnails, (4) control socket and menu bar helper.
+- Roles: Opus codes, Fable designs and advises, Sonnet tests, Haiku documents, a fresh Opus agent reviews each milestone. Run in auto mode; no push, no deleted user files, no invented results.
+- Plan, decisions and progress: docs/SPRINT3-OVERVIEW.md
