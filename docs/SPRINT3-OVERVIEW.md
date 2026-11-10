@@ -89,7 +89,7 @@ Verification:
 
 ### 2. Animations and cassette hiss
 
-Status: planned
+Status: in progress on branch overhaul-2-motion, unreviewed, see the handoff section
 
 Branch `overhaul-2-motion`.
 
@@ -412,6 +412,243 @@ One instruction from Fable was wrong and was reversed after the re-review: dropp
 - The `next:` line (replaced by the Queue tab).
 - The two-step login hint.
 
+### Milestone 2: motion, meters, hiss (in progress, handoff)
+
+#### Status in one paragraph
+
+Milestone 2 is built but unreviewed and unmerged. It lives on branch `overhaul-2-motion` as five commits by an Opus agent (`7516142` clock and reels, `782ad73` key caps and tape swap, `783037f` level meters, `2de9b4c` hiss, `09c6f1b` SPRINT.md). The user stopped that agent while it was starting a follow-up change (its last words: "First the spec's 36-column meter row and the idle-whirr gate."). It made no further commits and never delivered a final report. This section was written afterwards by reading the code and running fmt, clippy and tests (results below). Nothing was run against a real mpv or the network by the author of this section. Everything in the commit messages and in SPRINT.md's milestone 2 entry (including "verified live") is claimed by the implementer, not checked.
+
+#### How to resume
+
+- Branch: `git switch overhaul-2-motion`. `main` is at `26c597b` (milestone 1 merged); the branch is 7 commits ahead of it: `98d66e9` (milestone 1 write-up), the five above, and `d6dd805` (the user committed `docs/overhaul-specs/`).
+- Read first: `CLAUDE.md`, this document (Decisions, Roles and process, the milestone 1 write-up), `docs/overhaul-specs/m2-motion-spec.md` (the spec; it wins over `plan.md`), then `docs/overhaul-specs/plan.md` if needed.
+- Commands: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo test dump_renders -- --ignored --nocapture` (prints the screens).
+- Working rules:
+  - Commit with explicit paths (`git add <file> ...`, never `-A` or `.`): `.codex/` and `.gemini/` are untracked and must stay out. No push. Do not touch `main` until the final fast-forward.
+  - Unit tests never start a real mpv, touch the real config dir, or use the network (use `mpv = "true"`, the socket stand-ins in `player.rs` tests, and `TERMUSIC_CONFIG_DIR`).
+  - Never block the UI thread on IO or network. Level reads already run on a background thread; keep it that way.
+  - Level meters show real mpv levels only. Never simulate movement. If the filter cannot be made to work, remove the meters row and say so (spec section 6).
+  - A spike that fails ends that item with a note in "Items for you to review", not a fake.
+- Live checks must use a scratch `TERMUSIC_CONFIG_DIR` and a low volume (the pty driver sets 5). Do not run them against the user's real config.
+
+#### What was built
+
+Verdicts are from reading the code and the tests, not from running the app.
+
+| Spec section | Verdict | Where |
+|---|---|---|
+| 1 Animation clock, `animations` setting | implemented, one gate wrong (see Remaining work 1) | `src/anim.rs` (`Anim`, `FRAME`), `App::animating`, `run_tui` in `src/main.rs`, `Row::Animations` |
+| 2 Reels | implemented, whirr gate wrong | `Anim::advance`, `reel_steps`, `Anim::whirring`, `App::dispatch` |
+| 3 Pressing keys | implemented | `key_caps` in `src/ui/deck.rs`, `Anim::pressed_key`, `App::dispatch` |
+| 4 Tape swap | implemented | `swap_phase`, `Anim::swap_to`, `slide` and `cassette` in `deck.rs`, `App::on_event(TrackStarted)` |
+| 5 Counter | implemented | `counter_row` (dim digits), `Anim::dim_digits` |
+| 6 Level meters | implemented in code; real-mpv behaviour unchecked; row is 34 columns, not the spec's 36 | `LEVEL_FILTER`, `meter_loop`, `read_levels`, `parse_levels`, `sync_meter` in `src/player.rs`; `segments`, `peak_fall`, `Anim::meters` in `anim.rs`; `meter_row` in `deck.rs` |
+| 7 Tape hiss | implemented, with departures from the spec's source string (see below); real-mpv behaviour unchecked | `sync_hiss`, `set_hiss_level`, `hiss_command`, `hiss_volume`, `HISS_*` in `player.rs`; `App::set_hiss`, `set_hiss_level`; `Row::Hiss`, `Row::HissLevel`; `draw_settings` in `src/ui/overlay.rs` |
+| 8 Tests | implemented | 195 tests pass (was 174 after milestone 1); `dump_renders` has the meters, held-key and three swap-phase screens; `animating_truth_table`, `animations_off_draws_the_milestone_1_reels`, `level_parsing`, `hiss_*` tests exist |
+
+Notes by section:
+- Section 1: `Anim` differs a little from the spec's struct (it also holds `now`, `shown`, `reel`, counter-change times, levels and peaks). The frame is `elapsed / 50 ms`; pure functions take plain numbers, so tests need no clock. With animations off the meter row is blank, reels step once a second as in milestone 1, and the loop stays at 200 ms.
+- Section 3: the deck row budget grew by one row (`STACK_H` 18 to 19), so the Pocket tier now needs 31 rows (was 30). The spec allowed this.
+- Section 4: with no old tape the swap start is backdated by `EJECT_MS`, which skips the eject phase. The hubs are drawn bare during eject and insert.
+- Section 6: the lit segments come from RMS only; the peak marker is the highest RMS segment (the spec says "highest segment reached"). `parse_levels` returns the left value for both channels on a mono source. The meter thread is started on first use and then lives until the `Player` is dropped; it sleeps 100 ms per loop and idles when its socket is `None`.
+- Section 7: hiss volume is `volume * level / 100` and ignores any crossfade fade.
+
+The snippets below are copied from the current source.
+
+`swap_phase` in `src/anim.rs` is the pure phase function (eject 200 ms, insert 200 ms, seat 200 ms):
+
+```rust
+pub fn swap_phase(ms: u64) -> Option<Phase> {
+    match ms {
+        0..200 => Some(Phase::Eject((ms / ROW_MS) as usize)),
+        200..400 => Some(Phase::Insert(((ms - 200) / ROW_MS) as usize)),
+        400..600 => Some(Phase::Seat),
+        _ => None,
+    }
+}
+```
+
+`Anim::whirring` and the hub step in `Anim::advance` (`src/anim.rs`) decide when the reels spin. The `playing || whirr` condition is the whirr gate that needs fixing:
+
+```rust
+    pub fn whirring(&self) -> bool {
+        self.whirr.is_some_and(|t| self.since(t) < WHIRR) || self.phase() == Some(Phase::Seat)
+    }
+// ...
+        let whirr = self.whirring();
+        if playing || whirr {
+            self.reel += reel_steps(self.frame, frame, whirr) as usize;
+        }
+```
+
+`App::animating` in `src/app.rs` picks the 50 ms or 200 ms loop:
+
+```rust
+    pub fn animating(&self) -> bool {
+        self.settings.animations && (self.player.playing || self.anim.busy())
+    }
+```
+
+The level filter and the hiss constants at the top of `src/player.rs`. The hiss constants are the ones to tune by ear:
+
+```rust
+const LEVEL_FILTER: &str = "--af=@lvl:lavfi=[astats=metadata=1:reset=1:measure_overall=none:measure_perchannel=RMS_level+Peak_level]";
+/// Tape hiss, generated by its own mpv; tune these by ear. The source has no duration
+/// because `--loop-file` does not restart an `av://lavfi` source: it plays until killed.
+pub const HISS_NOISE: &str = "anoisesrc=color=pink";
+// ...
+pub const HISS_AMPLITUDE: f64 = 0.5;
+/// Shapes the noise toward tape hiss: no rumble, the high end left.
+pub const HISS_FILTER: &str = "highpass=f=1000";
+```
+
+`Player::sync_hiss` in `src/player.rs` starts, pauses and kills the hiss mpv (called from `tick`, `sync_pause` and `App::set_hiss`):
+
+```rust
+    pub fn sync_hiss(&mut self) {
+        if !(self.hiss_on && self.current.is_some()) {
+            if let Some(h) = self.hiss.take() {
+                h.kill();
+            }
+            return;
+        }
+        let paused = !self.playing;
+        match &self.hiss {
+            None if !paused => {
+// ...
+            Some(h)
+                if self.hiss_paused != paused && ipc_to(&h.sock, &pause_json(paused)).is_ok() =>
+            {
+                self.hiss_paused = paused;
+            }
+            _ => {}
+        }
+    }
+```
+
+`parse_levels` in `src/player.rs` turns mpv's `af-metadata/lvl` reply into `(left, right)` dB:
+
+```rust
+fn parse_levels<S: AsRef<str>>(lines: &[S]) -> Option<(f32, f32)> {
+    let v = reply(lines, 1)?;
+    let ch = |n: u8| {
+        v["data"][format!("lavfi.astats.{n}.RMS_level")]
+            .as_str()?
+            .parse::<f32>()
+            .ok()
+            .filter(|x| !x.is_nan())
+    };
+    let l = ch(1)?;
+    Some((l, ch(2).unwrap_or(l)))
+}
+```
+
+#### Check results
+
+Observed on branch `overhaul-2-motion` (source identical to `09c6f1b`; the only later commit adds the spec files):
+- `cargo fmt --check`: no output, exit 0.
+- `cargo clippy --all-targets -- -D warnings`: finished with no warnings, exit 0.
+- `cargo test`: `test result: ok. 195 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out` (the ignored test is `dump_renders`).
+- `cargo test dump_renders -- --ignored --nocapture`: `test result: ok. 1 passed; 0 failed`.
+- Grep of `src/` for `TODO`, `shortcut:`, `#[allow(`, `#[ignore`: only the three older `shortcut:` notes (`youtube.rs`, two in `queue.rs`) and the `dump_renders` ignore. No new ones from milestone 2. No `#[allow]` anywhere.
+- Every new `Settings` field (`animations`, `hiss`, `hiss_level`) has a Settings row, and every new row has a field. The help screen and README have no new keys to add; neither mentions animations, hiss or meters (grep only).
+
+Render from `dump_renders`, playing at 80x24 with meters at L -15 dB, R -18 dB, peaks held:
+
+```
+╭─ TERMUSIC ────────────────────────────────────── ⤮ ↻1 ── VOL ▮▮▮▮▮▮▮▯▯▯ 70% ─╮
+│                                    │ 1 RESULTS  2 QUEUE  3 LISTS  4 HISTORY  │
+│ ╭────────────────────────────────╮ │ ♪ never gonna give              8 found │
+│ │ ┌────────────────────────────┐ │ │─────────────────────────────────────────│
+│ │ │ A ──────────────────────── │ │ │▸01 Never Gonna Give You Up  Rick Astley │
+│ │ │ Never Gonna Give You Up    │ │ │ 02 Take On Me                      a-ha │
+│ │ │                            │ │ │ 03 Africa                          Toto │
+│ │ │ Rick Astley                │ │ │ 04 Sweet Dreams (Are Made …  Eurythmics │
+│ │ │ ────────────────────── C90 │ │ │ 05 Everybody Wants To R…  Tears For Fe… │
+│ │ └────────────────────────────┘ │ │ 06 Don't You (Forget Abo…  Simple Minds │
+│ │     ╭────────────────────╮     │ │ 07 Tainted Love               Soft Cell │
+│ │     │ ▓▓(◑)▓▓     ▓(◒)▓  │     │ │ 08 Blue Monday                New Order │
+│ │     ╰────────────────────╯     │ │                                         │
+│ ╰─◦──────────▔▔▔▔▔▔▔▔──────────◦─╯ │                                         │
+│                                    │                                         │
+│ 072  ━━━━━━●───────────────   1:12 │                                         │
+│ L ▮▮▮▮▮▮▮▮▮▯▯▯▮▯  R ▮▮▮▮▮▮▮▮▯▯▮▯▯▯ │                                         │
+│   ┌───┐     ┌───┐┌───┐             │                                         │
+│   │◀◀ │┌───┐│▮▮ ││▶▶ │┌───┐┌───┐   │                                         │
+│   └─b─┘│ ▶ │└─p─┘└─n─┘│ ⤮ ││↻1 │   │                                         │
+│    ▀▀▀ └─p─┘ ▀▀▀  ▀▀▀ └─s─┘└─l─┘   │                                         │
+│                                    │                                         │
+│                                    │                                         │
+╰─ / search · Tab next tab · Enter play · ? help ───────────────────── TPS-L2 ─╯
+```
+
+Render with `n` held down (momentary press; the meters are unlit because no levels were set in that test):
+
+```
+╭─ TERMUSIC ────────────────────────────────────── ⤮ ↻1 ── VOL ▮▮▮▮▮▮▮▯▯▯ 70% ─╮
+│                                    │ 1 RESULTS  2 QUEUE  3 LISTS  4 HISTORY  │
+│ ╭────────────────────────────────╮ │ ♪ never gonna give              8 found │
+│ │ ┌────────────────────────────┐ │ │─────────────────────────────────────────│
+│ │ │ A ──────────────────────── │ │ │▸01 Never Gonna Give You Up  Rick Astley │
+│ │ │ Never Gonna Give You Up    │ │ │ 02 Take On Me                      a-ha │
+│ │ │                            │ │ │ 03 Africa                          Toto │
+│ │ │ Rick Astley                │ │ │ 04 Sweet Dreams (Are Made …  Eurythmics │
+│ │ │ ────────────────────── C90 │ │ │ 05 Everybody Wants To R…  Tears For Fe… │
+│ │ └────────────────────────────┘ │ │ 06 Don't You (Forget Abo…  Simple Minds │
+│ │     ╭────────────────────╮     │ │ 07 Tainted Love               Soft Cell │
+│ │     │ ▓▓(◐)▓▓     ▓(◓)▓  │     │ │ 08 Blue Monday                New Order │
+│ │     ╰────────────────────╯     │ │                                         │
+│ ╰─◦──────────▔▔▔▔▔▔▔▔──────────◦─╯ │                                         │
+│                                    │                                         │
+│ 072  ━━━━━━●───────────────   1:12 │                                         │
+│ L ▯▯▯▯▯▯▯▯▯▯▯▯▯▯  R ▯▯▯▯▯▯▯▯▯▯▯▯▯▯ │                                         │
+│   ┌───┐     ┌───┐                  │                                         │
+│   │◀◀ │┌───┐│▮▮ │┌───┐┌───┐┌───┐   │                                         │
+│   └─b─┘│ ▶ │└─p─┘│▶▶ ││ ⤮ ││↻1 │   │                                         │
+│    ▀▀▀ └─p─┘ ▀▀▀ └─n─┘└─s─┘└─l─┘   │                                         │
+│                                    │                                         │
+│                                    │                                         │
+╰─ / search · Tab next tab · Enter play · ? help ───────────────────── TPS-L2 ─╯
+```
+
+#### Remaining work
+
+Do these in order.
+
+1. Known unfinished fixes.
+   1. Idle whirr gate. `App::dispatch` sets `anim.whirr` for `Next`, `Prev` and `Seek` whenever animations are on, before the command runs and whether or not a track is loaded or the command succeeded. `Anim::advance` then steps the hubs when `playing || whirr`, and `App::animating` is true while `anim.busy()`. So pressing `n` or a seek key on an empty deck spins the hubs for 400 ms and runs the 50 ms loop, and a seek while paused also spins them. The spec says paused or idle hubs hold their glyph. Fix: set `whirr` only when a track is loaded (`player.now_playing.is_some()`), and decide whether a paused seek should whirr (the spec text only says "after a seek, next or prev"; holding while paused is the safer reading). The `Phase::Seat` whirr in `Anim::whirring` also spins the hubs even if the new track starts paused; check that case. Then fix `animating_truth_table` in `src/app.rs`: its row `(true, false, true, true)` asserts that an idle deck with a whirr animates, which encodes the current behaviour.
+   2. Meter row width. `meter_row` in `src/ui/deck.rs` draws 34 columns (`L ` + 14 segments, two spaces, `R ` + 14 segments), the same as `CASSETTE_W`. The deck pane (`PANE_W`) is 36 columns and the render shows the row fits with one blank column each side; I found no overflow. The spec draws 36 columns (one leading space, a three-space gap). So the departure is cosmetic: the row is 2 columns narrower than the spec's drawing. I could not tell from the evidence what exactly the implementer meant to fix. Decide: widen to 36 as drawn in the spec (then check Pocket and the `meter_row` test, which asserts `CASSETTE_W`), or keep 34 and note it in the spec. Check what the Pocket tier does with a narrower pane.
+   3. Hiss source departs from the spec. The spec asked for `av://lavfi:anoisesrc=color=pink:amplitude=0.05:duration=60` with `--loop-file=inf`. The code has no `duration`, no `--loop-file`, and `HISS_AMPLITUDE = 0.5`. The code comment says `--loop-file` does not restart an `av://lavfi` source (claimed by the implementer, not checked). Confirm with a silent `--ao=null` mpv that the source plays without ending for longer than the old 60 s, and that the amplitude and the cubic volume scale give a sensible level. The code comment says level 30 is about 40 dB under the music; SPRINT.md says about 31 dB. They disagree; correct whichever is wrong.
+   4. A hiss mpv that dies is never noticed. `sync_hiss` only spawns when `self.hiss` is `None`; if the process exits (bad filter string, device error), `self.hiss` stays `Some` and nothing restarts it or clears it. The music mpvs are checked with `try_wait` in `tick`; the hiss is not. Add a `try_wait` check and decide whether to retry (with a limit) or to give up quietly.
+   5. The hiss spawn increments the shared `spawned` counter, so track socket numbers skip. Harmless; leave unless it confuses a test.
+2. Live verification against a real mpv, which nobody independent has done. Use a pty driver with a scratch `TERMUSIC_CONFIG_DIR` and volume 5. `docs/overhaul-specs/live-check.py` is a pty driver written for an earlier check (pause sync and loop); adapt it. Run it with the binary path as its first argument. Check:
+   - Levels move with real music and read empty when paused (from inside and from outside), and silence reads empty.
+   - Preload and crossfade still work with the filter on both mpvs, and the meters follow the promoted track.
+   - The `astats` filter does not break playback of a real YouTube stream.
+   - Hiss starts only when it is on and a track is playing; its volume follows the slider and the app volume; it pauses with the music, including a pause from outside (mpv poll); it survives a track change without a gap.
+   - Nothing is left running after quit and after `kill -9` of the app: no music mpv, no hiss mpv, no watchdog `sh`, no `termusic-hiss-*.sock` or `termusic-mpv-*.sock` in the temp dir.
+   - With animations off the loop returns to 200 ms and the deck is the milestone 1 deck.
+3. Independent review by a fresh Opus agent against the spec, as in the process above. Focus: the meter thread's lifetime, locking and socket races, the hiss lifecycle, and the whirr and animating logic.
+4. Fix what the review finds; rerun fmt, clippy and the tests.
+5. Update this section: change the heading to drop "in progress, handoff", add "Verified" and "Not verified" subsections like milestone 1, and replace "Remaining work".
+6. Add the final milestone 2 entries to "Items for you to review" (replace the "unfinished" subsection).
+7. Update `SPRINT.md` (its milestone 2 entry makes "verified live" claims; correct them to what was actually checked) and `CLAUDE.md` (architecture: `anim.rs`, the meter thread, the hiss mpv; the `animations`, `hiss` and `hiss_level` settings).
+8. Set milestone 2's status line under `## Milestones` to done, commit with explicit paths, and fast-forward `main` (`git switch main && git merge --ff-only overhaul-2-motion`). No push unless the user asks.
+
+#### Not verified
+
+- That the app works against a real mpv and yt-dlp with the level filter, preload, crossfade or the hiss mpv (everything below is claimed by the implementer, not checked: levels follow the music, meters empty when paused, hiss behaviours, no leftovers after quit or `kill -9`).
+- That `av://lavfi:anoisesrc=...` without `--loop-file` plays indefinitely.
+- That any process is cleaned up after `kill -9`; the watchdog code and its unit tests were only read and run.
+- How any of it looks or sounds in a real terminal (animation pacing, key press, tape swap, meters, hiss).
+- CPU use of the 50 ms loop and the 10 Hz meter thread.
+- The Pocket tier at the new 31-row threshold in a real terminal (render tests only).
+
+#### After milestone 2
+
+- Milestones 3 and 4 are specified in `docs/overhaul-specs/m3-art-spec.md` and `docs/overhaul-specs/m4-helper-spec.md`; nothing of them is built.
+- Spike results already established by the designer: mpv's `af-metadata` level reads work (0.12 ms per round trip); a separate mpv playing `av://lavfi:anoisesrc=...` works for hiss; `ratatui-image` 11.1.0 declares `ratatui ^0.30.1` but has not been built here.
+
 ## Items for you to review
 
 Things decided or left open while you were away. Each one is cheap to reverse; say the word.
@@ -442,3 +679,26 @@ Not verified:
 Known and left alone:
 - Pressing `/` keeps the previous query in the field instead of clearing it, so a new search means deleting the old text first. Easy to change to "select all" or "clear" if you prefer.
 - With a signed-in account, every visit to the Lists tab refetches playlists (also when tabbing past it).
+
+### Milestone 2 (unfinished)
+
+Milestone 2 is not finished, so these are what you will have to judge once it is. Nothing here has been heard or seen in a real terminal.
+
+Needs your ears and eyes:
+- How the hiss sounds and its default level (30 percent of the volume, off by default). It is pink noise through a 1 kHz high-pass.
+- Whether the meters feel right: 14 segments, -42 dB to 0 dB, peak hold 500 ms, ten reads a second.
+- The key press (150 ms), the tape swap (600 ms: eject, insert, seat) and the turning reels (a step every 150 ms, whirr for 400 ms after seek, next or prev).
+- Whether the 50 ms redraw rate is acceptable over ssh or on a slow terminal. The Animations setting turns all of it off.
+
+Tune by ear: the hiss noise constants `HISS_NOISE` (colour), `HISS_AMPLITUDE` (0.5) and `HISS_FILTER` (`highpass=f=1000`) at the top of `src/player.rs`. They are meant to be changed by you; the default level is `DEFAULT_HISS_LEVEL` in `src/settings.rs`.
+
+Design decisions the implementer made that the spec did not dictate (read from the code):
+1. The hiss amplitude is 0.5, not the spec's 0.05, and the source has no `duration` and no `--loop-file`. The implementer's comment gives a reason (claimed, not checked).
+2. Level meters are tied to the Animations setting: off means no meter thread reads and a blank row.
+3. The Pocket layout now needs 31 rows (was 30) because the key block grew by a row. The spec allowed raising it.
+4. The meter row is 34 columns wide, not the 36 the spec draws.
+5. Lit segments and the peak both come from the RMS level; the Peak_level value is requested but not used.
+6. The meter thread, once started, lives until the app exits (it idles at 100 ms steps).
+7. The hiss ignores a crossfade's volume ramp and follows only the app volume and its own level. It is stopped when no track is loaded, and kept across a track change.
+8. A hiss that fails to start, or later dies, stays silent with no message.
+9. The first track after start skips the eject phase; a track that starts during a swap restarts it with the label on screen as the old one (as the spec says).
