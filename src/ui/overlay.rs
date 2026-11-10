@@ -170,6 +170,14 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
             format!("{}%  ←/→ -/+", app.player.volume),
         ),
         row(Row::Shell, "Shell", format!("{}  ←/→", app.shell().name)),
+        row(
+            Row::Animations,
+            "Animations",
+            format!(
+                "{}  Enter ←/→",
+                if app.settings.animations { "on" } else { "off" }
+            ),
+        ),
         row(Row::HistoryFile, "History file", path),
     ];
     lines.extend(

@@ -1,3 +1,4 @@
+mod anim;
 mod app;
 mod auth;
 mod cmd;
@@ -64,7 +65,12 @@ fn run_tui() -> Result<()> {
         while !app.quit {
             app.tick();
             terminal.draw(|f| ui::draw(f, &mut app))?;
-            if event::poll(Duration::from_millis(200))?
+            let wait = if app.animating() {
+                anim::FRAME
+            } else {
+                Duration::from_millis(200)
+            };
+            if event::poll(wait)?
                 && let Event::Key(k) = event::read()?
                 && k.kind == KeyEventKind::Press
             {

@@ -1,4 +1,5 @@
 //! Application state and key handling.
+use crate::anim::Anim;
 use crate::cmd::{self, Cmd, Event};
 use crate::commands;
 use crate::history::{self, Entry};
@@ -12,6 +13,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Results of background network tasks, applied to `App` by `tick`.
@@ -89,12 +91,19 @@ impl Screen {
 pub enum Row {
     Volume,
     Shell,
+    Animations,
     HistoryFile,
     ClearHistory,
 }
 
 impl Row {
-    pub const ALL: [Row; 4] = [Row::Volume, Row::Shell, Row::HistoryFile, Row::ClearHistory];
+    pub const ALL: [Row; 5] = [
+        Row::Volume,
+        Row::Shell,
+        Row::Animations,
+        Row::HistoryFile,
+        Row::ClearHistory,
+    ];
 }
 
 pub struct App {
@@ -145,6 +154,7 @@ pub struct App {
     resume_at: u64,
     /// First visible line of the help screen.
     pub help_scroll: u16,
+    pub anim: Anim,
 }
 
 impl App {
@@ -186,6 +196,7 @@ impl App {
             settings,
             setting_row: 0,
             help_scroll: 0,
+            anim: Anim::new(Instant::now()),
             playlists: Vec::new(),
             from_playlist: false,
             #[cfg(test)]
@@ -221,6 +232,17 @@ impl App {
         let i = (theme::shell_index(&self.settings.shell) as isize + step).rem_euclid(n);
         self.settings.shell = theme::SHELLS[i as usize].id.into();
         self.save_settings();
+    }
+
+    /// Turn animations on or off (Settings today, the control socket later) and save the choice.
+    pub fn set_animations(&mut self, on: bool) {
+        self.settings.animations = on;
+        self.save_settings();
+    }
+
+    /// Something on screen moves, so the loop runs at the frame rate.
+    pub fn animating(&self) -> bool {
+        self.settings.animations && (self.player.playing || self.anim.busy())
     }
 
     /// Run a network task off the UI thread; offline is detected first and reported as `Msg::Offline`.
@@ -350,6 +372,13 @@ impl App {
             Some(false) => self.on_event(Event::TrackFailed),
             None => {}
         }
+        let p = &self.player;
+        let count = if p.now_playing.is_some() {
+            p.position.max(0.0) as u64 % 1000
+        } else {
+            0
+        };
+        self.anim.advance(Instant::now(), p.playing, count);
     }
 
     /// Keep the background preload matching the queue: drop a stale one, start one near the end.
@@ -399,6 +428,9 @@ impl App {
 
     /// Perform a playback command (from a key today; media keys later). Errors go to the status bar.
     pub fn dispatch(&mut self, c: Cmd) {
+        if self.settings.animations && matches!(c, Cmd::Next | Cmd::Prev | Cmd::Seek(_)) {
+            self.anim.whirr = Some(Instant::now());
+        }
         let r = match c {
             Cmd::PlayPause => self.player.toggle_pause(),
             // Advances even on loop-one: the user asked for another track.
@@ -715,6 +747,9 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.setting_row = self.setting_row.saturating_sub(1)
+            }
+            KeyCode::Enter | KeyCode::Left | KeyCode::Right if row == Row::Animations => {
+                self.set_animations(!self.settings.animations)
             }
             KeyCode::Left if row == Row::Shell => self.cycle_shell(-1),
             KeyCode::Right if row == Row::Shell => self.cycle_shell(1),
@@ -1373,6 +1408,13 @@ mod tests {
         press(&mut a, KeyCode::Char('j'));
         assert_eq!(Row::ALL[a.setting_row], Row::Shell);
         press(&mut a, KeyCode::Char('j'));
+        assert_eq!(Row::ALL[a.setting_row], Row::Animations);
+        assert!(a.settings.animations);
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Right);
+        press(&mut a, KeyCode::Left);
+        assert!(!a.settings.animations && a.player.volume == 45); // toggled, volume untouched
+        press(&mut a, KeyCode::Char('j'));
         assert_eq!(Row::ALL[a.setting_row], Row::HistoryFile);
         a.history_path = Some("/h.json".into());
         press(&mut a, KeyCode::Enter);
@@ -1856,6 +1898,39 @@ mod tests {
         assert_eq!(a.queue.current().map(|t| t.id.as_str()), Some("d"));
         assert!(a.player.preloaded_id().is_none() && a.player.tried.is_none());
         a.player.stop();
+    }
+
+    #[test]
+    fn animating_truth_table() {
+        let mut a = app();
+        for (on, playing, whirr, want) in [
+            (true, false, false, false),
+            (true, true, false, true),
+            (true, false, true, true),
+            (false, true, false, false),
+            (false, false, true, false),
+        ] {
+            a.settings.animations = on;
+            a.player.playing = playing;
+            a.anim.whirr = whirr.then_some(a.anim.now);
+            assert_eq!(a.animating(), want, "{on} {playing} {whirr}");
+        }
+        a.anim.whirr = Some(a.anim.now - std::time::Duration::from_secs(1)); // over
+        a.settings.animations = true;
+        a.player.playing = false;
+        assert!(!a.animating());
+    }
+
+    #[test]
+    fn seek_next_and_prev_whirr_only_with_animations() {
+        let mut a = app();
+        a.dispatch(Cmd::Seek(5));
+        assert!(a.anim.whirr.is_some());
+        a.anim.whirr = None;
+        a.settings.animations = false;
+        a.dispatch(Cmd::Prev);
+        a.dispatch(Cmd::Seek(-5));
+        assert!(a.anim.whirr.is_none());
     }
 
     #[test]

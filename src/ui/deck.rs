@@ -155,12 +155,14 @@ fn window(s: &Shell, v: &CassetteView) -> Vec<Span<'static>> {
 }
 
 /// `012  ━━━━●────  1:12`: tape counter, progress and elapsed time in `width` columns.
+/// `dim` digits are between numbers (they just rolled).
 pub fn counter_row(
     s: &Shell,
     position: f64,
     duration: Option<f64>,
     loaded: bool,
     width: usize,
+    dim: [bool; 3],
 ) -> Line<'static> {
     let secs = if loaded { position.max(0.0) as u64 } else { 0 };
     let elapsed = if loaded {
@@ -169,10 +171,12 @@ pub fn counter_row(
         String::new()
     };
     let n = width.saturating_sub(12); // 3 counter + 2 + line + 2 + 5 time
-    let mut spans = vec![
-        Span::styled(format!("{:03}", secs % 1000), fg(s.text)),
-        Span::raw("  "),
-    ];
+    let mut spans: Vec<Span<'static>> = format!("{:03}", secs % 1000)
+        .chars()
+        .zip(dim)
+        .map(|(c, d)| Span::styled(c.to_string(), fg(if d { s.dim } else { s.text })))
+        .collect();
+    spans.push(Span::raw("  "));
     match duration.filter(|d| loaded && *d > 0.0) {
         Some(d) if n > 0 => {
             let head = ((position / d).clamp(0.0, 1.0) * (n - 1) as f64).round() as usize;
@@ -248,7 +252,12 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
         title,
         channel,
         progress: p.duration.filter(|d| *d > 0.0).map(|d| p.position / d),
-        spin: if p.playing { p.position as usize } else { 0 },
+        // Animations off: the milestone 1 reels, one step per second of playback.
+        spin: match (app.settings.animations, p.playing) {
+            (true, _) => app.anim.reel,
+            (false, true) => p.position as usize,
+            (false, false) => 0,
+        },
         loaded: p.now_playing.is_some(),
         art: false,
     };
@@ -256,7 +265,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
     if !pocket {
         lines.push(Line::raw(""));
     }
-    lines.push(counter_row(s, p.position, p.duration, v.loaded, CASSETTE_W));
+    let dim = if app.settings.animations {
+        app.anim.dim_digits()
+    } else {
+        [false; 3]
+    };
+    lines.push(counter_row(
+        s, p.position, p.duration, v.loaded, CASSETTE_W, dim,
+    ));
     lines.push(Line::raw("")); // level meters (milestone 2)
     lines.extend(key_caps(
         s,
@@ -481,22 +497,25 @@ mod tests {
     #[test]
     fn counter_row_fills_its_width() {
         let s = &TPS_L2;
-        let r = counter_row(s, 72.4, Some(240.0), true, 34);
+        let r = counter_row(s, 72.4, Some(240.0), true, 34, [false; 3]);
         assert_eq!(r.width(), 34);
         let t = text(&r);
         assert!(t.starts_with("072  ━") && t.ends_with(" 1:12"), "{t}");
         assert_eq!(t.matches('●').count(), 1);
-        let t = text(&counter_row(s, 1234.0, None, true, 34)); // live: no head, wraps at 1000
+        let t = text(&counter_row(s, 1234.0, None, true, 34, [false; 3])); // live: no head, wraps at 1000
         assert!(t.starts_with("234  ─") && !t.contains('●') && t.ends_with("20:34"));
-        let t = text(&counter_row(s, 50.0, Some(100.0), false, 34)); // nothing playing
+        let t = text(&counter_row(s, 50.0, Some(100.0), false, 34, [false; 3])); // nothing playing
         assert!(t.starts_with("000  ─") && !t.contains('●') && t.trim_end().ends_with('─'));
         assert_eq!(
-            text(&counter_row(s, 0.0, Some(10.0), true, 34)).find('●'),
+            text(&counter_row(s, 0.0, Some(10.0), true, 34, [false; 3])).find('●'),
             Some(5)
         );
-        assert!(text(&counter_row(s, 10.0, Some(10.0), true, 34)).contains("━●  "));
+        assert!(text(&counter_row(s, 10.0, Some(10.0), true, 34, [false; 3])).contains("━●  "));
+        let r = counter_row(s, 72.0, Some(240.0), true, 34, [false, true, false]);
+        let colors: Vec<_> = r.spans[..3].iter().map(|sp| sp.style.fg).collect();
+        assert_eq!(colors, [Some(s.text), Some(s.dim), Some(s.text)]); // 0 7 2: the 7 rolls
         for w in [0, 5, 12, 13] {
-            counter_row(s, 5.0, Some(10.0), true, w); // tiny: no panic
+            counter_row(s, 5.0, Some(10.0), true, w, [true; 3]); // tiny: no panic
         }
     }
 

@@ -426,6 +426,30 @@ mod tests {
     }
 
     #[test]
+    fn animations_off_draws_the_milestone_1_reels() {
+        let hubs = |a: &mut App| {
+            let r = rows(a, 80, 24);
+            let l = r
+                .iter()
+                .find(|l| l.contains(")▓") || l.contains(") "))
+                .unwrap();
+            l.chars()
+                .filter(|c| theme::REEL_FRAMES.contains(c))
+                .collect::<String>()
+        };
+        let mut a = playing(); // 72 s in
+        a.anim.reel = 5;
+        a.settings.animations = false;
+        assert_eq!(hubs(&mut a), "◐◓"); // frame = whole seconds, as before
+        a.player.position = 73.0;
+        assert_eq!(hubs(&mut a), "◓◑");
+        a.player.playing = false;
+        assert_eq!(hubs(&mut a), "◐◓"); // paused: back to frame 0
+        a.settings.animations = true;
+        assert_eq!(hubs(&mut a), "◓◑"); // the animation clock's frame, held while paused
+    }
+
+    #[test]
     fn idle_deck_shows_no_tape_and_empty_results_hint() {
         let mut a = blank();
         let s = render(&mut a, 80, 24);

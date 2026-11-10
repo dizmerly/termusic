@@ -12,6 +12,8 @@ pub struct Settings {
     pub history_path: Option<PathBuf>,
     /// Id of the color shell (`theme::SHELLS`); kept as written, an unknown id draws the default.
     pub shell: String,
+    /// Moving reels, keys, tape swap and level meters; off draws the deck still.
+    pub animations: bool,
 }
 
 impl Default for Settings {
@@ -20,6 +22,7 @@ impl Default for Settings {
             volume: DEFAULT_VOLUME,
             history_path: None,
             shell: crate::theme::SHELLS[0].id.into(),
+            animations: true,
         }
     }
 }
@@ -109,12 +112,14 @@ mod tests {
             volume: 33,
             history_path: Some("/h.json".into()),
             shell: "amber".into(),
+            animations: false,
         }
         .save_to(&p)
         .unwrap();
         let got = Settings::load_from(&p);
         assert_eq!((got.volume, got.history_path), (33, Some("/h.json".into())));
         assert_eq!(got.shell, "amber");
+        assert!(!got.animations);
         std::fs::write(&p, "{not json").unwrap();
         assert_eq!(Settings::load_from(&p), Settings::default()); // corrupt
         std::fs::write(&p, "{}").unwrap();
