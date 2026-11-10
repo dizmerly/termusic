@@ -27,7 +27,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     ])
     .areas(area);
     let w = area.width as usize;
-    let strip = tab_strip(s, app.tab().tab_index(), app.results.len(), w);
+    let strip = tab_strip(s, app.tab().tab_index(), w);
     f.render_widget(Paragraph::new(strip), tabs);
     f.render_widget(Paragraph::new(search_line(s, app, w)), search);
     f.render_widget(
@@ -54,9 +54,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         }
         Screen::History => {
             let rows: Vec<Track> = app.history.iter().map(history_row).collect();
-            // shortcut: the link and resume time need ~26 columns; the title keeps at least 8.
-            let cap = w.saturating_sub(15);
-            draw_list(f, app, &rows, cap, "Nothing played yet", list);
+            draw_list(f, app, &rows, w / 3, "Nothing played yet", list);
         }
         _ => {
             let rows = std::mem::take(&mut app.results);
@@ -66,26 +64,16 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// `1 RESULTS 30  2 QUEUE  3 LISTS  4 HISTORY`, spread over `w` columns; the active tab is
-/// reversed. Labels shrink (no count, then short names, then digits) until they fit.
-pub fn tab_strip(s: &Shell, active: Option<usize>, results: usize, w: usize) -> Line<'static> {
+/// ` 1 RESULTS  2 QUEUE  3 LISTS  4 HISTORY `, spread over `w` columns; the active tab is
+/// reversed. Labels shrink (short names, then digits) until they fit.
+pub fn tab_strip(s: &Shell, active: Option<usize>, w: usize) -> Line<'static> {
     const NAMES: [(&str, &str); 4] = [
         ("RESULTS", "RES"),
         ("QUEUE", "QUE"),
         ("LISTS", "LST"),
         ("HISTORY", "HIS"),
     ];
-    let count = |i: usize| {
-        if i == 0 && results > 0 {
-            format!(" {results}")
-        } else {
-            String::new()
-        }
-    };
-    let options: [Vec<String>; 4] = [
-        (0..4)
-            .map(|i| format!("{} {}{}", i + 1, NAMES[i].0, count(i)))
-            .collect(),
+    let options: [Vec<String>; 3] = [
         (0..4)
             .map(|i| format!("{} {}", i + 1, NAMES[i].0))
             .collect(),
@@ -98,13 +86,13 @@ pub fn tab_strip(s: &Shell, active: Option<usize>, results: usize, w: usize) -> 
     let mut labels = options
         .iter()
         .find(|l| total(l) + 3 <= w)
-        .unwrap_or(&options[3])
+        .unwrap_or(&options[2])
         .clone();
     if total(&labels) + 8 + 3 <= w {
         labels = labels.iter().map(|l| format!(" {l} ")).collect(); // room for key-like tabs
     }
     let free = w.saturating_sub(total(&labels));
-    let edge = usize::from(free >= 8); // a margin only when the gaps keep 2 columns
+    let edge = usize::from(free >= 5); // a margin on each side while the gaps keep a column
     let gap = free.saturating_sub(2 * edge) / 3;
     let on = Style::new()
         .bg(s.accent)
@@ -118,11 +106,25 @@ pub fn tab_strip(s: &Shell, active: Option<usize>, results: usize, w: usize) -> 
         let style = if active == Some(i) { on } else { fg(s.dim) };
         spans.push(Span::styled(l, style));
     }
+    spans.push(Span::raw(" ".repeat(free.saturating_sub(edge + 3 * gap))));
     Line::from(spans)
 }
 
-/// `♪ query▏` while typing; the last query, or a hint, otherwise.
+/// `♪ query▏` while typing; the last query, or a hint, otherwise. `N found` sits at the
+/// right end when there are results and room; the query always wins.
 fn search_line(s: &Shell, app: &App, w: usize) -> Line<'static> {
+    let mut line = query_line(s, app, w);
+    let found = format!("{} found", app.results.len());
+    let used = line.width() + 1; // keep a right margin
+    if !app.results.is_empty() && used + 1 + found.width() <= w {
+        line.spans
+            .push(Span::raw(" ".repeat(w - used - found.width())));
+        line.spans.push(Span::styled(found, fg(s.dim)));
+    }
+    line
+}
+
+fn query_line(s: &Shell, app: &App, w: usize) -> Line<'static> {
     let room = w.saturating_sub(4);
     if app.searching {
         // Show the end of a long query: that is where the typing happens.
@@ -261,27 +263,26 @@ mod tests {
     fn tab_strip_fits_every_pane_width() {
         let s = &TPS_L2;
         for w in [0, 1, 4, 7, 10, 20, 23, 30, 36, 37, 41, 60, 81, 200] {
-            for results in [0, 9, 30, 100] {
+            {
                 for active in [None, Some(0), Some(3)] {
-                    let l = tab_strip(s, active, results, w);
+                    let l = tab_strip(s, active, w);
                     assert!(l.width() <= w.max(7), "w={w} {:?}", l.to_string());
                 }
             }
         }
-        let t = |w, n| tab_strip(s, Some(0), n, w).to_string();
-        assert!(t(41, 30).starts_with("1 RESULTS 30") && t(41, 30).ends_with("4 HISTORY"));
-        assert!(!t(41, 0).contains(" 0")); // no count without results
-        assert!(t(37, 30).contains("1 RESULTS") && !t(37, 30).contains("30")); // count goes first
-        assert!(t(36, 30).contains("4 HISTORY"));
-        assert!(t(25, 0).contains("1 RES") && t(25, 0).contains("4 HIS"));
-        assert_eq!(t(10, 0).split_whitespace().collect::<String>(), "1234");
-        assert!(t(81, 30).contains(" 1 RESULTS 30 ")); // wide: padded like keys
+        let t = |w| tab_strip(s, Some(0), w).to_string();
+        assert_eq!(t(41), " 1 RESULTS  2 QUEUE  3 LISTS  4 HISTORY  "); // edge margins
+        assert!(t(37).starts_with(" 1 RESULTS") && t(37).ends_with("4 HISTORY "));
+        assert!(t(36).contains("4 HISTORY"));
+        assert!(t(25).contains("1 RES") && t(25).contains("4 HIS"));
+        assert_eq!(t(10).split_whitespace().collect::<String>(), "1234");
+        assert!(t(81).contains(" 1 RESULTS ")); // wide: padded like keys
     }
 
     #[test]
     fn active_tab_is_reversed_and_others_dim() {
         let s = &TPS_L2;
-        let l = tab_strip(s, Some(1), 0, 41);
+        let l = tab_strip(s, Some(1), 41);
         let tabs: Vec<_> = l
             .spans
             .iter()

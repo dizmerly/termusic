@@ -173,15 +173,21 @@ fn draw_bar(f: &mut Frame, app: &App, area: Rect) {
         (false, true) => "F1 help ",
         (false, false) => "? help ",
     };
-    let mut right = vec![Span::styled(hint, fg(s.dim))];
-    if area.width >= 40 {
-        let vol = format!("{} {}%  ", theme::ICON_NOTE, app.player.volume);
-        right.insert(0, Span::styled(vol, fg(s.text)));
-    }
+    let mut right = Vec::new();
     if let (Some(d), true) = (app.player.duration, area.width >= 60) {
         let time = format!("{} / {}  ", mmss(app.player.position), mmss(d));
         let level = bar(app.player.position / d.max(1.0), 10, ['█', '░']);
-        right.insert(0, Span::styled(format!("{level} {time}"), fg(s.text)));
+        right.push(Span::styled(format!("{level} {time}"), fg(s.text)));
+    }
+    let vol = format!("{} {}%  ", theme::ICON_NOTE, app.player.volume);
+    right.push(Span::styled(vol, fg(s.text)));
+    right.push(Span::styled(hint, fg(s.dim)));
+    // Short of room: the hint goes first, then the volume, before the title is cut.
+    let left_full: usize = spans.iter().map(Span::width).sum::<usize>() + 1;
+    for _ in 0..2 {
+        if left_full + right.iter().map(Span::width).sum::<usize>() > area.width as usize {
+            right.pop();
+        }
     }
     let rw = right.iter().map(Span::width).sum::<usize>() as u16;
     let [left, right_area] =
@@ -208,10 +214,11 @@ fn mmss(secs: f64) -> String {
     format!("{:02}:{:02}", s / 60, s % 60)
 }
 
-/// History entry as a list row: the channel column shows the short link and resume time.
+/// History entry as a list row: the channel column shows the resume time (the deck's status
+/// row shows the link).
 fn history_row(e: &Entry) -> Track {
     Track {
-        channel: format!("youtu.be/{} {}", e.track.id, mmss(e.position_secs as f64)),
+        channel: mmss(e.position_secs as f64),
         ..e.track.clone()
     }
 }
@@ -391,7 +398,15 @@ mod tests {
                 .any(|l| l.contains("└─b─┘└─p─┘└─p─┘└─n─┘└─s─┘└─l─┘"))
         );
         assert!(r[22].contains("queued: Take On Me")); // status pinned to the pane bottom
-        assert!(r[1].contains("1 RESULTS 8") && r[1].contains("4 HISTORY"));
+        assert_eq!(
+            r[1],
+            "│                                    │ 1 RESULTS  2 QUEUE  3 LISTS  4 HISTORY  │"
+        );
+        assert!(
+            r[2].ends_with("♪ never gonna give              8 found │"),
+            "{}",
+            r[2]
+        );
         assert!(r[2].contains("♪ never gonna give"));
         assert!(r.iter().any(|l| l.contains("▸01 Never Gonna Give")));
         assert!(r.iter().all(|l| l.width() == 80));
@@ -507,7 +522,7 @@ mod tests {
                 let col = r[y][..r[y].find(t).unwrap()].chars().count();
                 (col as u16, y as u16)
             };
-            assert_eq!(b[(38, 1)].bg, s.accent); // active tab, reversed
+            assert_eq!(b[(39, 1)].bg, s.accent); // active tab, reversed
             assert_eq!(b[find("Never Gonna Give You Up")].bg, s.label); // label text on paper
             assert_eq!(b[find("02 Take On Me")].bg, s.select_bg); // selected row
         }
@@ -534,9 +549,7 @@ mod tests {
         a.status.clear();
         let r = rows(&mut a, 60, 16);
         assert!(!r[0].contains("TERMUSIC") && r[0].contains("1 RESULTS"));
-        assert!(
-            r[15].contains("▶ Never") && r[15].contains("01:12 / 04:00") && r[15].contains("70%")
-        );
+        assert!(r[15].contains("▶ Never Gonna Give You Up") && r[15].contains("01:12 / 04:00"));
     }
 
     #[test]
@@ -629,6 +642,16 @@ mod tests {
         assert!(row(&mut a).contains("♪ take on me▏"));
         a.input = "x".repeat(100) + "END";
         assert!(row(&mut a).contains("xEND▏")); // a long query shows its end
+        assert!(!row(&mut a).contains("found")); // the query wins over the count
+        a.results = vec![track("t", "c", "i")];
+        a.input = "take on me".into();
+        assert!(
+            row(&mut a)
+                .trim_end_matches(['│', ' '])
+                .ends_with("1 found")
+        );
+        a.searching = false;
+        assert!(row(&mut a).contains("♪ take on me") && row(&mut a).contains("1 found"));
     }
 
     #[test]
@@ -724,11 +747,18 @@ mod tests {
         assert!(s.contains("01:05 / 03:05") && s.contains("80%") && s.contains("help"));
         let s = rows(&mut a, 50, 16).pop().unwrap(); // narrow: no progress
         assert!(!s.contains("01:05") && s.contains("80%"));
-        let s = rows(&mut a, 30, 16).pop().unwrap(); // tiny: no volume
-        assert!(!s.contains("80%"));
+        let s = rows(&mut a, 30, 16).pop().unwrap(); // short: the hint goes first
+        assert!(s.contains("nothing playing") && s.contains("80%") && !s.contains("help"));
+        let s = rows(&mut a, 22, 16).pop().unwrap(); // then the volume
+        assert!(s.contains("nothing playing") && !s.contains("80%"));
         a.player.now_playing = Some("T".repeat(120));
-        let s = rows(&mut a, 60, 16).pop().unwrap();
+        let s = rows(&mut a, 60, 16).pop().unwrap(); // a long title is cut only after both
         assert!(s.contains("…") && s.contains("01:05 / 03:05"));
+        assert!(!s.contains("80%") && !s.contains("help"));
+        a.player.now_playing = Some("Short".into());
+        a.status = "queued: x".into();
+        let s = rows(&mut a, 60, 16).pop().unwrap();
+        assert!(s.contains("Short") && s.contains("queued: x"));
     }
 
     #[test]
@@ -756,12 +786,29 @@ mod tests {
             track: track("Old", "Chan", "abc123"),
             position_secs: 83,
         };
-        assert_eq!(history_row(&e).channel, "youtu.be/abc123 01:23");
+        assert_eq!(history_row(&e).channel, "01:23");
         let mut app = blank();
         app.screen = Screen::History;
         app.history = vec![e];
-        let out = render(&mut app, 80, 24);
-        assert!(out.contains("Old") && out.contains("youtu.be/abc123 01:23"));
+        let r = rows(&mut app, 80, 24);
+        assert!(
+            r.iter()
+                .any(|l| l.contains("01 Old") && l.ends_with("01:23 │"))
+        );
+        assert!(r[22].contains("youtu.be/abc123")); // the link is in the deck's status row
+        let b = buffer(&mut app, 80, 24);
+        assert_eq!(b[(3, 22)].fg, app.shell().dim);
+        app.status = "history cleared".into(); // a real status wins
+        let r = rows(&mut app, 80, 24);
+        assert!(r[22].contains("history cleared") && !r.concat().contains("youtu.be"));
+        app.status.clear();
+        app.searching = true; // focus in the search field: no link
+        assert!(!render(&mut app, 80, 24).contains("youtu.be"));
+        app.searching = false;
+        app.screen = Screen::Help; // overlay: no link
+        assert!(!render(&mut app, 80, 24).contains("youtu.be"));
+        app.screen = Screen::History;
+        assert!(!render(&mut app, 60, 16).contains("youtu.be")); // Compact has no status row
         render(&mut app, 30, 6);
     }
 
@@ -820,6 +867,15 @@ mod tests {
                 a.queue.add(track(n, "Various", n));
             }
             show("Deck, Queue tab", &mut a, w, h);
+            let mut a = playing();
+            a.screen = Screen::History;
+            a.status.clear();
+            for (i, t) in a.results.clone().into_iter().enumerate().rev() {
+                crate::history::push(&mut a.history, t);
+                a.history[0].position_secs = 37 * i as u64;
+            }
+            a.select(1);
+            show("Deck, History tab", &mut a, w, h);
             let mut a = playing();
             a.screen = Screen::Help;
             show("Deck, Help overlay", &mut a, w, h);

@@ -1,7 +1,7 @@
 //! The deck pane: cassette, tape counter and transport keys. The drawing functions are
 //! pure (shell and plain values in, lines out) so they test without a terminal.
 use super::{fit, pad, wrap};
-use crate::app::App;
+use crate::app::{App, Screen};
 use crate::commands;
 use crate::queue::Loop;
 use crate::theme::{self, Shell, fg};
@@ -123,7 +123,7 @@ pub fn pack(level: usize) -> String {
 /// Pack levels (0..=6) of the left and right reels.
 pub fn levels(v: &CassetteView) -> (usize, usize) {
     match (v.loaded, v.progress) {
-        (false, _) => (6, 0),
+        (false, _) => (0, 0), // no tape in the deck
         (true, None) => (3, 3),
         (true, Some(p)) => {
             let p = p.clamp(0.0, 1.0);
@@ -284,8 +284,15 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
     if app.busy {
         status.push(format!("{} working…", theme::ICON_BUSY));
     }
+    let mut color = s.accent;
     if !app.status.is_empty() {
         status.push(app.status.clone());
+    } else if app.screen == Screen::History
+        && !app.searching
+        && let Some(e) = app.history.get(app.selected)
+    {
+        status.push(format!("youtu.be/{}", e.track.id)); // the link left out of the list row
+        color = s.dim;
     }
     let row = if pocket {
         stack_h
@@ -296,7 +303,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
         let r = Rect::new(area.x, area.y + row, area.width, 1);
         let text = fit(&status.join("  "), (area.width as usize).saturating_sub(4));
         f.render_widget(
-            Paragraph::new(Line::styled(format!("  {text}"), fg(s.accent))),
+            Paragraph::new(Line::styled(format!("  {text}"), fg(color))),
             r,
         );
     }
@@ -447,7 +454,7 @@ mod tests {
         assert_eq!(lv(Some(3.0), true), (0, 6));
         assert_eq!(lv(Some(-1.0), true), (6, 0));
         assert_eq!(lv(None, true), (3, 3)); // unknown length
-        assert_eq!(lv(Some(0.9), false), (6, 0)); // no tape: all on the left
+        assert_eq!(lv(Some(0.9), false), (0, 0)); // no tape: both hubs bare
     }
 
     #[test]
@@ -461,6 +468,12 @@ mod tests {
         assert_eq!(row(Some(0.25), 0), "│     │▒▓▓(◐)▓▓▒    ▓(◓)▓  │     │");
         assert_eq!(row(None, 0), "│     │ ▒▓(◐)▓▒    ▒▓(◓)▓▒ │     │");
         assert_eq!(row(Some(1.0), 0), "│     │   (◐)     ▓▓▓(◓)▓▓▓│     │");
+        let mut idle = view("", Some(0.5), false, false);
+        idle.spin = 3;
+        assert_eq!(
+            text(&cassette(&TPS_L2, &idle)[9]),
+            "│     │   (◒)        (◐)   │     │"
+        );
         assert_ne!(row(Some(0.3), 0), row(Some(0.3), 1));
         assert_eq!(row(Some(0.3), 0), row(Some(0.3), theme::REEL_FRAMES.len()));
     }
