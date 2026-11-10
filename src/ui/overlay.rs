@@ -1,5 +1,5 @@
 //! Help, Settings and Offline, drawn as a panel over the J-card pane.
-use super::{fit, wrap};
+use super::{bar, fit, wrap};
 use crate::app::{App, Row, Screen};
 use crate::commands;
 use crate::theme::{self, Shell, fg};
@@ -150,12 +150,12 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
     } else {
         format!("Enter ({n} track{})", if n == 1 { "" } else { "s" })
     };
-    let row = |r: Row, label: &str, value: String| {
+    let row_in = |r: Row, label: &str, value: String, color| {
         let sel = Row::ALL[app.setting_row] == r;
         let line = Line::from(vec![
             Span::styled(if sel { " ▸ " } else { "   " }, fg(s.accent)),
             Span::styled(format!("{label:<14}"), fg(s.text)),
-            Span::styled(fit(&value, room), fg(s.accent)),
+            Span::styled(fit(&value, room), fg(color)),
         ]);
         if sel {
             line.style(theme::selected(s))
@@ -163,6 +163,7 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
             line
         }
     };
+    let row = |r: Row, label: &str, value: String| row_in(r, label, value, s.accent);
     let mut lines = vec![
         row(
             Row::Volume,
@@ -177,6 +178,24 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
                 "{}  Enter ←/→",
                 if app.settings.animations { "on" } else { "off" }
             ),
+        ),
+        row(
+            Row::Hiss,
+            "Tape hiss",
+            format!(
+                "{}  Enter ←/→",
+                if app.settings.hiss { "on" } else { "off" }
+            ),
+        ),
+        row_in(
+            Row::HissLevel,
+            "Hiss level",
+            format!(
+                "{} {}%  ←/→",
+                bar(f64::from(app.settings.hiss_level) / 100.0, 10, ['▮', '▯']),
+                app.settings.hiss_level
+            ),
+            if app.settings.hiss { s.accent } else { s.dim },
         ),
         row(Row::HistoryFile, "History file", path),
     ];

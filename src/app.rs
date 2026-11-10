@@ -92,15 +92,19 @@ pub enum Row {
     Volume,
     Shell,
     Animations,
+    Hiss,
+    HissLevel,
     HistoryFile,
     ClearHistory,
 }
 
 impl Row {
-    pub const ALL: [Row; 5] = [
+    pub const ALL: [Row; 7] = [
         Row::Volume,
         Row::Shell,
         Row::Animations,
+        Row::Hiss,
+        Row::HissLevel,
         Row::HistoryFile,
         Row::ClearHistory,
     ];
@@ -185,6 +189,8 @@ impl App {
         let (tx, rx) = unbounded_channel();
         let mut player = Player::new(settings.volume);
         player.meters = settings.animations;
+        player.hiss_on = settings.hiss;
+        player.hiss_level = settings.hiss_level;
         Self {
             history: history_path
                 .as_deref()
@@ -240,6 +246,21 @@ impl App {
     pub fn set_animations(&mut self, on: bool) {
         self.settings.animations = on;
         self.player.meters = on;
+        self.save_settings();
+    }
+
+    /// Tape hiss on or off; it starts with the next playing frame and is saved.
+    pub fn set_hiss(&mut self, on: bool) {
+        self.settings.hiss = on;
+        self.player.hiss_on = on;
+        self.player.sync_hiss();
+        self.save_settings();
+    }
+
+    /// Hiss level, 0..=100 (clamped); the running hiss follows at once.
+    pub fn set_hiss_level(&mut self, level: u8) {
+        self.player.set_hiss_level(level);
+        self.settings.hiss_level = self.player.hiss_level;
         self.save_settings();
     }
 
@@ -778,6 +799,15 @@ impl App {
             }
             KeyCode::Enter | KeyCode::Left | KeyCode::Right if row == Row::Animations => {
                 self.set_animations(!self.settings.animations)
+            }
+            KeyCode::Enter | KeyCode::Left | KeyCode::Right if row == Row::Hiss => {
+                self.set_hiss(!self.settings.hiss)
+            }
+            KeyCode::Left | KeyCode::Char('-') if row == Row::HissLevel => {
+                self.set_hiss_level(self.settings.hiss_level.saturating_sub(cmd::STEP as u8))
+            }
+            KeyCode::Right | KeyCode::Char('+') if row == Row::HissLevel => {
+                self.set_hiss_level(self.settings.hiss_level.saturating_add(cmd::STEP as u8))
             }
             KeyCode::Left if row == Row::Shell => self.cycle_shell(-1),
             KeyCode::Right if row == Row::Shell => self.cycle_shell(1),
@@ -1442,6 +1472,27 @@ mod tests {
         press(&mut a, KeyCode::Right);
         press(&mut a, KeyCode::Left);
         assert!(!a.settings.animations && a.player.volume == 45); // toggled, volume untouched
+        press(&mut a, KeyCode::Char('j'));
+        assert_eq!(Row::ALL[a.setting_row], Row::Hiss);
+        press(&mut a, KeyCode::Enter); // on: no track loaded, so no hiss mpv yet
+        assert!(a.settings.hiss && a.player.hiss_on);
+        press(&mut a, KeyCode::Char('j'));
+        assert_eq!(Row::ALL[a.setting_row], Row::HissLevel);
+        press(&mut a, KeyCode::Right);
+        press(&mut a, KeyCode::Char('+'));
+        assert_eq!((a.settings.hiss_level, a.player.hiss_level), (40, 40));
+        for _ in 0..12 {
+            press(&mut a, KeyCode::Right); // clamps at 100
+        }
+        assert_eq!(a.settings.hiss_level, 100);
+        for _ in 0..25 {
+            press(&mut a, KeyCode::Char('-')); // and at 0
+        }
+        assert_eq!((a.settings.hiss_level, a.player.volume), (0, 45));
+        press(&mut a, KeyCode::Char('k'));
+        press(&mut a, KeyCode::Left); // off again
+        assert!(!a.settings.hiss && !a.player.hiss_on);
+        press(&mut a, KeyCode::Char('j'));
         press(&mut a, KeyCode::Char('j'));
         assert_eq!(Row::ALL[a.setting_row], Row::HistoryFile);
         a.history_path = Some("/h.json".into());
