@@ -102,6 +102,8 @@ pub struct App {
     /// Screens under the current overlay, oldest first; Esc pops one.
     stack: Vec<Screen>,
     pub input: String,
+    /// The query of the search in flight (trimmed).
+    submitted: String,
     pub results: Vec<Track>,
     pub playlists: Vec<Track>,
     /// `results` is an opened playlist (keeps its order; no related lookup on play).
@@ -195,6 +197,7 @@ impl App {
             screen,
             stack: Vec::new(),
             input: String::new(),
+            submitted: String::new(),
             results: Vec::new(),
             searching: true,
             tab_sel: [(0, 0); 4],
@@ -239,7 +242,7 @@ impl App {
 
     fn run_search(&mut self) {
         let q = self.input.trim().to_owned();
-        self.searching = false; // leave the field now: replies never move focus
+        self.submitted = q.clone(); // the Tracks reply moves focus only if this is still the input
         self.spawn(async move { Ok(Msg::Tracks(youtube::search(&q).await?)) });
     }
 
@@ -286,7 +289,9 @@ impl App {
                 self.busy = false;
             }
             // Replies never move focus: whoever is typing keeps typing.
+            // The one exception: results for the unchanged submitted query hand focus to the list.
             let typing = self.searching;
+            let mut focus_list = false;
             match m {
                 Msg::Online => self.on_event(Event::Connection(true)),
                 Msg::Offline => self.on_event(Event::Connection(false)),
@@ -302,6 +307,7 @@ impl App {
                     self.open_playlists();
                 }
                 Msg::Tracks(v) => {
+                    focus_list = !v.is_empty() && self.input.trim() == self.submitted;
                     self.from_playlist = false;
                     self.status = if v.is_empty() {
                         "no results".into()
@@ -336,7 +342,7 @@ impl App {
                     }
                 }
             }
-            self.searching = typing;
+            self.searching = typing && !focus_list;
         }
         self.sync_preload();
         match self.player.tick() {
@@ -381,7 +387,6 @@ impl App {
             }
             Event::Connection(true) => {
                 self.set_tab(Screen::Results);
-                self.searching = true;
             }
             Event::Connection(false) => {
                 self.save_sel();
@@ -1137,7 +1142,7 @@ mod tests {
         a.on_event(Event::Connection(false));
         assert_eq!(a.screen, Screen::Offline);
         a.on_event(Event::Connection(true));
-        assert_eq!((a.screen, a.searching), (Screen::Results, true));
+        assert_eq!(a.screen, Screen::Results);
         a.queue.set(a.results.clone(), 29);
         a.on_event(Event::TrackEnded); // last track: queue ends
         assert!(a.queue.current().is_none());
@@ -1535,26 +1540,86 @@ mod tests {
     fn tracks_reply_switches_to_results_with_list_focus() {
         let mut a = app();
         press(&mut a, KeyCode::Char('4'));
+        a.input = "x".into();
+        a.submitted = "x".into();
+        a.searching = true;
         a.tx.send(Msg::Tracks(vec![track("n")])).unwrap();
         a.tick();
         assert_eq!(
             (a.screen, a.searching, a.selected),
             (Screen::Results, false, 0)
         );
+        // Not typing when it arrives: focus stays on the list.
+        a.tx.send(Msg::Tracks(vec![track("m")])).unwrap();
+        a.tick();
+        assert!(!a.searching);
+    }
+
+    fn submit(a: &mut App, q: &str) {
+        a.searching = true;
+        a.input = q.into();
+        press(a, KeyCode::Enter);
     }
 
     #[test]
-    fn submitting_a_search_leaves_the_field() {
+    fn submitting_a_search_keeps_the_field_and_typing_is_text() {
         // Spawned tasks never run (nothing drives this runtime), so the test stays offline.
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
         let _g = rt.enter();
         let mut a = app();
-        a.searching = true;
-        a.input = "x".into();
+        submit(&mut a, "x");
+        assert!(a.searching && a.busy);
+        for c in "nq".chars() {
+            press(&mut a, KeyCode::Char(c));
+        }
+        assert!(a.searching && !a.quit && a.input == "xnq");
+    }
+
+    #[test]
+    fn results_move_focus_only_for_the_unchanged_query() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _g = rt.enter();
+        let mut a = app();
+        submit(&mut a, "x");
+        a.tx.send(Msg::Tracks(vec![track("n")])).unwrap();
+        a.tick();
+        assert_eq!((a.screen, a.searching), (Screen::Results, false));
+
+        press(&mut a, KeyCode::Char('2')); // elsewhere, then a second search with more typing
+        submit(&mut a, "y");
+        press(&mut a, KeyCode::Char('z'));
+        a.tx.send(Msg::Tracks(vec![track("m")])).unwrap();
+        a.tick();
+        assert_eq!((a.screen, a.searching), (Screen::Results, true));
+        assert_eq!((a.results[0].id.as_str(), a.input.as_str()), ("m", "yz"));
+
+        // Errors and empty results leave focus in the field.
+        submit(&mut a, "w");
+        a.tx.send(Msg::Err("boom".into())).unwrap();
+        a.tick();
+        assert!(a.searching);
+        a.tx.send(Msg::Tracks(Vec::new())).unwrap();
+        a.tick();
+        assert!(a.searching);
+    }
+
+    #[test]
+    fn enter_on_the_signed_out_lists_tab_starts_login() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _g = rt.enter();
+        let mut a = app();
+        a.logged_in = Some(false);
+        press(&mut a, KeyCode::Char('3'));
+        assert_eq!(a.screen, Screen::Login);
+        a.busy = false;
         press(&mut a, KeyCode::Enter);
-        assert!(!a.searching);
+        assert!(a.busy);
     }
 
     #[test]

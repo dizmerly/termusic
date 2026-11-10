@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`termusic`: a text-only terminal YouTube Music player written in Rust with Ratatui. MVP scope: YouTube search (top-K results, no account), optional Google login for playlists, playback, keyboard-driven TUI with a help menu. Requires internet; offline must be detected and the user prompted to connect.
+`termusic`: a text-only terminal YouTube Music player written in Rust with Ratatui. MVP scope: YouTube search (top-K results, no account), optional Google login for playlists, playback, keyboard-driven TUI with a help menu, styled as a cassette deck (see `docs/SPRINT3-OVERVIEW.md`). Requires internet; offline must be detected and the user prompted to connect.
 
 ## Commands
 
@@ -17,8 +17,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Architecture
 
 - `main.rs`: clap CLI + terminal setup/teardown; no subcommand launches the TUI.
-- `app.rs`: single `App` state struct + `Screen` enum (Login, Search, Results, Playlists, Help, Offline). All state mutation goes through `App`; `ui.rs` only reads it.
-- `ui.rs` / `theme.rs`: Ratatui rendering; logo, icons (unicode), colors live in `theme.rs`.
+- `app.rs`: single `App` state struct + `Screen` enum (Results, Queue, Playlists, History are the four tabs; Help and Settings are overlays on the `stack`; Login and Offline draw in the list pane). Typing a search is a focus flag (`searching`), not a screen: Enter keeps focus in the field; the results reply moves it to the list only if the query is unchanged, and no other async reply may change focus. Each tab keeps its own selection. All state mutation goes through `App`; `ui` only reads it.
+- `ui/` + `theme.rs`: Ratatui rendering as "The Deck": `ui/mod.rs` (frame, tier choice: Deck side by side from 76x22, Pocket stacked, Compact list + one-line bar), `ui/deck.rs` (cassette, tape counter, transport keys, status row; pure functions from plain inputs), `ui/jcard.rs` (tab strip, search field, lists), `ui/overlay.rs` (help, settings). Every color comes from the active `theme::Shell` (TPS-L2 default, Sunset tape, Amber hi-fi; `shell` in settings.json).
 - `net.rs`: connectivity check (TCP connect w/ short timeout). Called at startup and before every network action; failure switches to `Screen::Offline` with a "connect to the internet" prompt, retry on `r`.
 - `auth.rs`: optional Google OAuth 2.0 loopback-redirect flow (Desktop client; device flow is rejected for it), only needed for playlists; tokens in `tokens.json` (0600) in the user config dir, refreshed automatically.
 - `youtube.rs`: search via `yt-dlp` (no account; `config::TOP_K`, default 30); playlists via YouTube Data API v3 (first 50 tracks).

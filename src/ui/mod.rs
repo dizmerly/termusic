@@ -923,4 +923,26 @@ mod tests {
         }
         assert_eq!(clean("a\tb\nc"), "a b c");
     }
+
+    #[test]
+    fn control_characters_in_status_and_input_do_not_break_the_frame() {
+        let check = |a: &mut App, want: &str| {
+            let r = rows(a, 80, 24);
+            assert!(r.iter().any(|l| l.contains(want)), "{want:?} not drawn");
+            let last = |l: &String| l.chars().last();
+            assert_eq!(last(&r[0]), Some('╮'));
+            assert_eq!(last(&r[23]), Some('╯'));
+            assert!(
+                r[1..23].iter().all(|l| last(l) == Some('│')),
+                "border moved"
+            );
+        };
+        let mut a = blank();
+        a.status = "a\tb\nc".into();
+        check(&mut a, "a b c");
+        let mut a = blank();
+        a.searching = true;
+        a.input = "x\ty".into();
+        check(&mut a, "x y");
+    }
 }
