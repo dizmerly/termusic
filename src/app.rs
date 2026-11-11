@@ -1,5 +1,5 @@
 //! Application state and key handling.
-use crate::anim::{Anim, Key};
+use crate::anim::{Anim, Key, by_volume};
 use crate::cmd::{self, Cmd, Event};
 use crate::commands;
 use crate::history::{self, Entry};
@@ -405,7 +405,10 @@ impl App {
         if p.now_playing.is_none() {
             self.anim.shown = None; // the deck is empty: the next tape has nothing to eject
         }
-        let levels = p.levels().filter(|_| p.playing);
+        let levels = p
+            .levels()
+            .filter(|_| p.playing)
+            .map(|(l, r)| (by_volume(l, p.volume), by_volume(r, p.volume)));
         self.anim.advance(Instant::now(), p.playing, count, levels);
     }
 

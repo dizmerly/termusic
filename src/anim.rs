@@ -35,6 +35,16 @@ pub fn segments(db: f32) -> usize {
     }
 }
 
+/// Volume at and above which the meters use their full scale and can reach the red top.
+const FULL_SCALE_VOLUME: f32 = 80.0;
+
+/// A level scaled to the app volume: the meter's reach shrinks linearly below
+/// `FULL_SCALE_VOLUME` (volume 16 tops out at a fifth of the meter).
+pub fn by_volume(db: f32, volume: u8) -> f32 {
+    let f = (f32::from(volume) / FULL_SCALE_VOLUME).min(1.0);
+    FLOOR_DB + (db - FLOOR_DB).max(0.0) * f
+}
+
 /// Where a peak reached `ms` ago is drawn now: held, then falling.
 pub fn peak_fall(peak: usize, ms: u64) -> usize {
     peak.saturating_sub((ms.saturating_sub(HOLD_MS) / FALL_MS) as usize)
@@ -271,6 +281,13 @@ mod tests {
         assert_eq!(segments(f32::NEG_INFINITY), 0); // digital silence
         assert_eq!(segments(f32::NAN), 0);
         assert_eq!(segments(-21.0), 7);
+        assert_eq!(segments(by_volume(0.0, 100)), SEGMENTS); // 80 % and up: full scale
+        assert_eq!(segments(by_volume(0.0, 80)), SEGMENTS);
+        assert!(segments(by_volume(0.0, 70)) >= SEGMENTS - 3); // still reaches the red
+        assert_eq!(segments(by_volume(0.0, 16)), 3); // low volume: a fifth at most
+        assert_eq!(segments(by_volume(-21.0, 40)), 4); // half the volume, half the reach
+        assert_eq!(segments(by_volume(0.0, 0)), 0);
+        assert_eq!(segments(by_volume(f32::NEG_INFINITY, 50)), 0);
         assert_eq!(segments(-3.0), 13);
         assert_eq!(segments(0.0), SEGMENTS);
         assert_eq!(segments(6.0), SEGMENTS);
