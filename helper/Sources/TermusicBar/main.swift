@@ -23,6 +23,7 @@ final class Bar: NSObject {
     let hissItem = NSMenuItem(title: "Tape hiss", action: nil, keyEquivalent: "")
     let volume = NSSlider(value: 0, minValue: 0, maxValue: 100, target: nil, action: nil)
     let hissLevel = NSSlider(value: 0, minValue: 0, maxValue: 100, target: nil, action: nil)
+    var shownShells: [ShellInfo] = []
     var lastSent: [ObjectIdentifier: Date] = [:]
     let loopModes = [("Off", "off"), ("This track", "one"), ("Whole queue", "all")]
 
@@ -110,13 +111,18 @@ final class Bar: NSObject {
             volume.integerValue = s.volume
             hissLevel.integerValue = s.hissLevel
         }
-        shellMenu.removeAllItems()
-        for sh in s?.shells ?? [] {
-            let i = act(sh.name.capitalized, #selector(shellTapped(_:)))
-            i.representedObject = sh.id
-            i.state = sh.id == s?.shell ? .on : .off
-            shellMenu.addItem(i)
+        // Rebuild only when the list changes; replacing items under the cursor breaks an open submenu.
+        let shells = s?.shells ?? []
+        if shells != shownShells {
+            shownShells = shells
+            shellMenu.removeAllItems()
+            for sh in shells {
+                let i = act(sh.name, #selector(shellTapped(_:)))
+                i.representedObject = sh.id
+                shellMenu.addItem(i)
+            }
         }
+        for i in shellMenu.items { i.state = (i.representedObject as? String) == s?.shell ? .on : .off }
         for i in [playItem, prevItem, nextItem, shuffleItem, loopItem, settingsItem, shellItem, thumbsItem, animItem, hissItem] {
             i.isEnabled = connected
         }

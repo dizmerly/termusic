@@ -50,6 +50,24 @@ private func state(_ s: String) -> State? { if case .state(let x)? = decodeLine(
     let a30 = String(repeating: "a", count: 30)
     #expect(menuTitle(state(stateLine(title: "Hi")), connected: true) == "♪ Hi")
     #expect(menuTitle(state(stateLine(title: a30 + "a")), connected: true) == "♪ " + a30 + "…")
+    #expect(menuTitle(state(stateLine(title: a30)), connected: true) == "♪ " + a30)
+    #expect(menuTitle(state(stateLine(title: "")), connected: true) == "♪")
+    #expect(menuTitle(state(real), connected: true) == "♪")
     #expect(menuTitle(nil, connected: true) == "♪")
     #expect(menuTitle(state(stateLine(title: "Hi")), connected: false) == "♪")
+}
+@Test func nullsDecode() {
+    let s = state(real)
+    #expect(s?.title == nil && s?.channel == nil && s?.duration == nil && s?.id == nil)
+}
+@Test func appErrorsDecode() {
+    #expect(decodeLine(d(#"{"error":"offline"}"#)) == .error("offline"))
+    #expect(decodeLine(d(#"{"error":"disabled"}"#)) == .error("disabled"))
+}
+@Test func missingFieldIsNil() {
+    #expect(decodeLine(d(stateLine(title: "T").replacingOccurrences(of: #""volume":70"#, with: #""x":1"#))) == nil)
+}
+@Test func nullPositionDecodes() {
+    let s = state(stateLine(title: "T").replacingOccurrences(of: #""position":72.0"#, with: #""position":null"#))
+    #expect(s != nil && s?.position == nil && s?.volume == 70)
 }

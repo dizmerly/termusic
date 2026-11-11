@@ -12,7 +12,8 @@ public struct State: Decodable, Equatable {
     public let id: String?
     public let loaded: Bool
     public let paused: Bool
-    public let position: Double
+    /// Optional so a null position still decodes; the UI treats nil as 0.
+    public let position: Double?
     public let duration: Double?
     public let volume: Int
     public let loop: String

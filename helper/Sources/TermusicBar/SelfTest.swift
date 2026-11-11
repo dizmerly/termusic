@@ -51,6 +51,14 @@ func runSelfTest() -> Never {
     check("title nil state", menuTitle(nil, connected: true) == "♪")
     check("title no title", menuTitle(real_state, connected: true) == "♪")
     check("title disconnected", menuTitle(titled("Hi"), connected: false) == "♪")
+    check("error offline ignored", decodeLine(d(#"{"error":"offline"}"#)) == .error("offline"))
+    check("error disabled ignored", decodeLine(d(#"{"error":"disabled"}"#)) == .error("disabled"))
+    check("title empty", menuTitle(titled(""), connected: true) == "♪")
+    let missing = full.replacingOccurrences(of: #""volume":70,"#, with: "")
+    check("missing field is nil", decodeLine(d(missing)) == nil)
+    let nullPos = full.replacingOccurrences(of: #""position":72.0"#, with: #""position":null"#)
+    if case .state(let s)? = decodeLine(d(nullPos)) { check("null position decodes", s.position == nil && s.volume == 70) }
+    else { check("null position decodes", false) }
     print(failed == 0 ? "ALL PASS" : "\(failed) FAILED")
     exit(failed == 0 ? 0 : 1)
 }
