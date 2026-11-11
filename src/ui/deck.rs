@@ -1,29 +1,33 @@
 //! The deck pane: cassette, tape counter and transport keys. The drawing functions are
 //! pure (shell and plain values in, lines out) so they test without a terminal.
 use super::{clean, fit, pad, wrap};
+use crate::anim::{Key, Phase, SEGMENTS};
 use crate::app::{App, Screen};
+use crate::art;
 use crate::commands;
 use crate::queue::Loop;
 use crate::theme::{self, Shell, fg};
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
+use ratatui_image::Image;
 use unicode_width::UnicodeWidthStr;
 
 /// Width of the deck pane.
 pub const PANE_W: u16 = 36;
 /// Cassette, blank, counter, meter row, keys.
-const STACK_H: u16 = 18;
+const STACK_H: u16 = 19;
 /// Rows the deck takes in the Pocket tier: the stack without the blank row, plus the status
-/// row, so a 30-row terminal leaves the J-card 10 rows.
+/// row, so a 31-row terminal leaves the J-card 10 rows.
 pub const POCKET_H: u16 = STACK_H;
 /// Cassette width; the counter row matches it.
 const CASSETTE_W: usize = 34;
 const LABEL_W: usize = 28;
+const LABEL_H: usize = 5;
 /// Columns kept for the thumbnail on the label (milestone 3): 10 x 5 cells.
 const ART_W: usize = 10;
 
@@ -39,6 +43,13 @@ pub struct CassetteView<'a> {
     pub loaded: bool,
     /// Leave the label's left 10 x 5 cells for the thumbnail.
     pub art: bool,
+    /// An image protocol draws the cover over the slot: leave it plain paper.
+    pub crisp: bool,
+    /// The cover as a 10 x 10 grid; without it an `art` slot shows the paper checker.
+    pub cover: Option<&'a art::Grid>,
+    /// A tape swap in progress, and the label (title, channel) being ejected.
+    pub phase: Option<Phase>,
+    pub old: (&'a str, &'a str),
 }
 
 /// The cassette: 12 rows of exactly 34 columns.
@@ -54,7 +65,21 @@ pub fn cassette(s: &Shell, v: &CassetteView) -> Vec<Line<'static>> {
         Line::styled(format!("╭{}╮", "─".repeat(32)), f),
         Line::styled(format!("│ ┌{}┐ │", "─".repeat(LABEL_W)), f),
     ];
-    out.extend(label(s, v).into_iter().map(|l| edge(l.spans)));
+    let empty = Line::from(Span::styled(" ".repeat(LABEL_W), Style::new().bg(s.body)));
+    let rows = match v.phase {
+        Some(Phase::Eject(k)) => {
+            let old = CassetteView {
+                title: v.old.0,
+                channel: v.old.1,
+                loaded: true,
+                ..*v
+            };
+            slide(label(s, &old), k, empty)
+        }
+        Some(Phase::Insert(k)) => slide(label(s, v), LABEL_H.saturating_sub(k), empty),
+        _ => label(s, v),
+    };
+    out.extend(rows.into_iter().map(|l| edge(l.spans)));
     out.push(Line::styled(format!("│ └{}┘ │", "─".repeat(LABEL_W)), f));
     out.push(Line::styled(format!("│     ╭{}╮     │", "─".repeat(20)), f));
     let mut win = vec![Span::styled("│     │", f)];
@@ -94,6 +119,8 @@ pub fn label(s: &Shell, v: &CassetteView) -> Vec<Line<'static>> {
     } else {
         ("NO TAPE".into(), "press / to search".into(), "")
     };
+    let hidden = !v.loaded || matches!(v.phase, Some(Phase::Eject(_) | Phase::Insert(_)));
+    let paper = mix(s.label, s.label_ink, 0.15);
     let rows = [
         (format!("A {}", "─".repeat(w.saturating_sub(2))), ink),
         (two, ink.add_modifier(Modifier::BOLD)),
@@ -102,12 +129,48 @@ pub fn label(s: &Shell, v: &CassetteView) -> Vec<Line<'static>> {
         (format!("{} C90", "─".repeat(w.saturating_sub(4))), ink),
     ];
     rows.into_iter()
-        .map(|(text, style)| {
-            Line::from(vec![
-                Span::styled(" ".repeat(left), ink),
-                Span::styled(pad(&text, w), style),
-                Span::styled(" ", ink),
-            ])
+        .enumerate()
+        .map(|(r, (text, style))| {
+            let mut spans = if !v.art || hidden || v.crisp {
+                vec![Span::styled(" ".repeat(left), ink)]
+            } else {
+                // Half-blocks: upper pixel is the foreground, lower the background.
+                let px = |x: usize, y: usize| match v.cover {
+                    Some(g) => g[y][x],
+                    None if (x + y).is_multiple_of(2) => s.label,
+                    None => paper,
+                };
+                let mut cells: Vec<_> = (0..ART_W)
+                    .map(|x| Span::styled("▀", Style::new().fg(px(x, 2 * r)).bg(px(x, 2 * r + 1))))
+                    .collect();
+                cells.push(Span::styled(" ", ink));
+                cells
+            };
+            spans.extend([Span::styled(pad(&text, w), style), Span::styled(" ", ink)]);
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// `a` moved `t` (0..1) of the way toward `b`; non-RGB colors stay as they are.
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+            let m = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+            Color::Rgb(m(ar, br), m(ag, bg), m(ab, bb))
+        }
+        _ => a,
+    }
+}
+
+/// Label rows moved up by `offset`: row `i` shows `rows[i + offset]`, or `empty` past the end.
+/// Eject slides the old label up (offset 0..5); insert brings the new one down (offset 5..0).
+pub fn slide(rows: Vec<Line<'static>>, offset: usize, empty: Line<'static>) -> Vec<Line<'static>> {
+    (0..rows.len())
+        .map(|i| {
+            rows.get(i + offset)
+                .cloned()
+                .unwrap_or_else(|| empty.clone())
         })
         .collect()
 }
@@ -138,7 +201,11 @@ pub fn levels(v: &CassetteView) -> (usize, usize) {
 /// The 20-column reel window: two 9-column reels and a 2-column gap.
 fn window(s: &Shell, v: &CassetteView) -> Vec<Span<'static>> {
     let bg = Style::new().bg(s.body);
-    let (l, r) = levels(v);
+    // Out of the deck mid-swap: bare hubs.
+    let (l, r) = match v.phase {
+        Some(Phase::Eject(_) | Phase::Insert(_)) => (0, 0),
+        _ => levels(v),
+    };
     let frame = |n: usize| theme::REEL_FRAMES[n % theme::REEL_FRAMES.len()];
     let reel = |level: usize, hub: char| {
         let side = pack(level);
@@ -155,12 +222,14 @@ fn window(s: &Shell, v: &CassetteView) -> Vec<Span<'static>> {
 }
 
 /// `012  ━━━━●────  1:12`: tape counter, progress and elapsed time in `width` columns.
+/// `dim` digits are between numbers (they just rolled).
 pub fn counter_row(
     s: &Shell,
     position: f64,
     duration: Option<f64>,
     loaded: bool,
     width: usize,
+    dim: [bool; 3],
 ) -> Line<'static> {
     let secs = if loaded { position.max(0.0) as u64 } else { 0 };
     let elapsed = if loaded {
@@ -169,10 +238,12 @@ pub fn counter_row(
         String::new()
     };
     let n = width.saturating_sub(12); // 3 counter + 2 + line + 2 + 5 time
-    let mut spans = vec![
-        Span::styled(format!("{:03}", secs % 1000), fg(s.text)),
-        Span::raw("  "),
-    ];
+    let mut spans: Vec<Span<'static>> = format!("{:03}", secs % 1000)
+        .chars()
+        .zip(dim)
+        .map(|(c, d)| Span::styled(c.to_string(), fg(if d { s.dim } else { s.text })))
+        .collect();
+    spans.push(Span::raw("  "));
     match duration.filter(|d| loaded && *d > 0.0) {
         Some(d) if n > 0 => {
             let head = ((position / d).clamp(0.0, 1.0) * (n - 1) as f64).round() as usize;
@@ -187,13 +258,39 @@ pub fn counter_row(
     Line::from(spans)
 }
 
-/// Six 5 x 3 transport key caps, 30 columns: prev, play, pause, next, shuffle, loop.
+/// `L ▮▮▮▮▮▮▮▮▯▯▯▯▯▯  R ▮▮▮▮▮▮▯▯▯▯▯▯▯▯`, 34 columns: (lit, peak) segments per channel; the
+/// peak segment is lit alone above the level. `None`: both meters unlit.
+pub fn meter_row(s: &Shell, m: Option<[(usize, usize); 2]>) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (ch, name) in ["L ", "R "].into_iter().enumerate() {
+        if ch == 1 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(name, fg(s.dim)));
+        let (lit, peak) = m.map_or((0, 0), |m| m[ch]);
+        for i in 0..SEGMENTS {
+            let on = i < lit || i + 1 == peak;
+            let color = match (on, i >= SEGMENTS - 3) {
+                (false, _) => s.dim,
+                (true, true) => s.meter_hi,
+                (true, false) => s.meter_lo,
+            };
+            spans.push(Span::styled(if on { "▮" } else { "▯" }, fg(color)));
+        }
+    }
+    Line::from(spans)
+}
+
+/// Six transport key caps in 4 rows of 33 columns (prev, pause, next are 6 x 3, the rest
+/// 5 x 3): prev, play, pause, next, shuffle, loop. An up cap sits in rows 1-3 over a shadow; a down cap (latched by its state, or
+/// `pressed` for a moment) sits in rows 2-4, lit.
 pub fn key_caps(
     s: &Shell,
     loaded: bool,
     playing: bool,
     shuffle: bool,
     looping: Loop,
+    pressed: Option<Key>,
 ) -> Vec<Line<'static>> {
     let loop_glyph = if looping == Loop::One {
         theme::ICON_LOOP_ONE
@@ -201,36 +298,85 @@ pub fn key_caps(
         theme::ICON_LOOP
     };
     let caps = [
-        ("◀◀", commands::prev::KEY, false),
-        ("▶", commands::pause::KEY, loaded && playing),
-        ("▮▮", commands::pause::KEY, loaded && !playing),
-        ("▶▶", commands::skip::KEY, false),
-        (theme::ICON_SHUFFLE, commands::shuffle::KEY, shuffle),
-        (loop_glyph, commands::loop_track::KEY, looping != Loop::Off),
+        (Key::Prev, "◀◀", commands::prev::KEY, false),
+        (Key::Play, "▶", commands::pause::KEY, loaded && playing),
+        (Key::Pause, "▮▮", commands::pause::KEY, loaded && !playing),
+        (Key::Next, "▶▶", commands::skip::KEY, false),
+        (
+            Key::Shuffle,
+            theme::ICON_SHUFFLE,
+            commands::shuffle::KEY,
+            shuffle,
+        ),
+        (
+            Key::Loop,
+            loop_glyph,
+            commands::loop_track::KEY,
+            looping != Loop::Off,
+        ),
     ];
-    let mut rows: [Vec<Span<'static>>; 3] = Default::default();
-    for (glyph, key, lit) in caps {
-        let (edge, face) = if lit {
+    let mut rows: [Vec<Span<'static>>; 4] = Default::default();
+    for (k, glyph, key, latched) in caps {
+        let down = latched || pressed == Some(k);
+        let (edge, face) = if down {
             let on = fg(s.accent).add_modifier(Modifier::BOLD);
             (on, on)
         } else {
             (fg(s.frame), fg(s.text))
         };
-        let gap = 3usize.saturating_sub(glyph.width());
-        rows[0].push(Span::styled("┌───┐", edge));
-        rows[1].push(Span::styled("│", edge));
-        rows[1].push(Span::styled(
-            format!(
-                "{}{glyph}{}",
-                " ".repeat(gap / 2),
-                " ".repeat(gap - gap / 2)
-            ),
-            face,
-        ));
-        rows[1].push(Span::styled("│", edge));
-        rows[2].push(Span::styled(format!("└─{key}─┘"), edge));
+        // The 2-column transport glyphs get a space each side; the other caps stay 3 inside.
+        let wide = matches!(k, Key::Prev | Key::Pause | Key::Next);
+        let inner = if wide { glyph.width() + 2 } else { 3 };
+        let gap = inner.saturating_sub(glyph.width());
+        let text = format!(
+            "{}{glyph}{}",
+            " ".repeat(gap / 2),
+            " ".repeat(gap - gap / 2)
+        );
+        let bar = "─".repeat(inner);
+        let label = if wide {
+            format!("└─{key}──┘")
+        } else {
+            format!("└─{key}─┘")
+        };
+        let cap = [
+            vec![Span::styled(format!("┌{bar}┐"), edge)],
+            vec![
+                Span::styled("│", edge),
+                Span::styled(text, face),
+                Span::styled("│", edge),
+            ],
+            vec![Span::styled(label, edge)],
+        ];
+        let top = usize::from(down);
+        for (row, spans) in rows[top..].iter_mut().zip(cap) {
+            row.extend(spans);
+        }
+        if down {
+            rows[0].push(Span::raw(" ".repeat(inner + 2)));
+        } else {
+            let shadow = format!(" {} ", "▀".repeat(inner));
+            rows[3].push(Span::styled(shadow, fg(s.dim)));
+        }
+        if k == Key::Next {
+            // One column sets the mode keys apart from the transport bank (34 = cassette width).
+            rows.iter_mut().for_each(|r| r.push(Span::raw(" ")));
+        }
     }
     rows.into_iter().map(Line::from).collect()
+}
+
+/// Where the 10 x 5 cover slot lands, given the area the centered stack is drawn in.
+fn slot_rect(stack: Rect) -> Option<Rect> {
+    let w = CASSETTE_W as u16;
+    (stack.width >= w && stack.height >= LABEL_H as u16 + 2).then(|| {
+        Rect::new(
+            stack.x + (stack.width - w) / 2 + 3,
+            stack.y + 2,
+            ART_W as u16,
+            LABEL_H as u16,
+        )
+    })
 }
 
 /// The deck pane. Deck tier: the stack centered vertically with the status row pinned to the
@@ -244,26 +390,54 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
         .current()
         .filter(|t| t.title == title)
         .map_or("", |t| t.channel.as_str());
+    let anim = app.settings.animations.then_some(&app.anim);
+    let swap = anim.and_then(|a| a.swap.as_ref());
+    let cur = app.queue.current().filter(|t| t.title == title);
+    let loaded = p.now_playing.is_some();
+    let thumbs = app.settings.thumbnails && loaded && app.art_path != art::ArtPath::Off;
+    let crisp = app
+        .cover_key()
+        .and_then(|k| app.cover_proto.as_ref().filter(|(ck, _)| *ck == k))
+        .and_then(|(_, p)| p.as_ref());
+    // Pixelized per frame (40x40 -> 10x10 is cheap) so a shell change recolors the cached source.
+    let grid = cur
+        .filter(|_| thumbs)
+        .and_then(|t| app.art.iter().find(|(id, _)| *id == t.id))
+        .map(|(_, src)| art::pixelize(src, 10, &art::shell_palette(s)));
     let v = CassetteView {
         title,
         channel,
         progress: p.duration.filter(|d| *d > 0.0).map(|d| p.position / d),
-        spin: if p.playing { p.position as usize } else { 0 },
-        loaded: p.now_playing.is_some(),
-        art: false,
+        // Animations off: the milestone 1 reels, one step per second of playback.
+        spin: match (anim, p.playing) {
+            (Some(a), _) => a.reel,
+            (None, true) => p.position as usize,
+            (None, false) => 0,
+        },
+        loaded,
+        art: thumbs,
+        crisp: crisp.is_some(),
+        cover: grid.as_ref(),
+        phase: anim.and_then(|a| a.phase()),
+        old: swap.map_or(("", ""), |(_, t, c)| (t.as_str(), c.as_str())),
     };
     let mut lines = cassette(s, &v);
     if !pocket {
         lines.push(Line::raw(""));
     }
-    lines.push(counter_row(s, p.position, p.duration, v.loaded, CASSETTE_W));
-    lines.push(Line::raw("")); // level meters (milestone 2)
+    let dim = anim.map_or([false; 3], |a| a.dim_digits());
+    lines.push(counter_row(
+        s, p.position, p.duration, v.loaded, CASSETTE_W, dim,
+    ));
+    // Animations off: no meters, the row stays blank.
+    lines.push(anim.map_or(Line::raw(""), |a| meter_row(s, a.meters())));
     lines.extend(key_caps(
         s,
         v.loaded,
         p.playing,
         app.queue.shuffle,
         app.queue.looping,
+        anim.and_then(|a| a.pressed_key()),
     ));
 
     let top = if pocket {
@@ -279,6 +453,10 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
         stack_h.min(area.height.saturating_sub(top)),
     );
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), stack);
+    // Not while a tape swaps: the slot slides as paper.
+    if let (Some(p), None | Some(Phase::Seat), Some(r)) = (crisp, v.phase, slot_rect(stack)) {
+        f.render_widget(Image::new(p), r);
+    }
 
     let mut status = Vec::new();
     if app.busy {
@@ -322,6 +500,10 @@ mod tests {
             spin: 0,
             loaded,
             art,
+            crisp: false,
+            cover: None,
+            phase: None,
+            old: ("", ""),
         }
     }
 
@@ -341,6 +523,7 @@ mod tests {
             "Supercalifragilisticexpialidocious_and_then_some_more",
             &long,
         ] {
+            let grid = vec![vec![Color::Rgb(1, 2, 3); 10]; 10];
             for (loaded, art) in [(true, false), (true, true), (false, false), (false, true)] {
                 for p in [
                     None,
@@ -351,10 +534,14 @@ mod tests {
                     Some(f64::NAN),
                 ] {
                     for s in SHELLS {
-                        let lines = cassette(s, &view(title, p, loaded, art));
-                        assert_eq!(lines.len(), 12);
-                        for l in &lines {
-                            assert_eq!(l.width(), CASSETTE_W, "{title:?} {art} {:?}", text(l));
+                        for cover in [None, Some(&grid)] {
+                            let mut v = view(title, p, loaded, art);
+                            v.cover = cover;
+                            let lines = cassette(s, &v);
+                            assert_eq!(lines.len(), 12);
+                            for l in &lines {
+                                assert_eq!(l.width(), CASSETTE_W, "{title:?} {art} {:?}", text(l));
+                            }
                         }
                     }
                 }
@@ -411,7 +598,8 @@ mod tests {
         let l: Vec<String> = label(&TPS_L2, &v).iter().map(text).collect();
         for r in &l {
             assert_eq!(r.width(), LABEL_W);
-            assert_eq!(&r[..ART_W + 1], " ".repeat(ART_W + 1)); // art + margin are blank
+            assert_eq!(r.chars().take(ART_W).collect::<String>(), "▀".repeat(ART_W));
+            assert_eq!(r.chars().nth(ART_W), Some(' ')); // margin
         }
         // 0-based column 11 is the first text column.
         assert_eq!(l[0].chars().nth(11), Some('A'));
@@ -421,6 +609,46 @@ mod tests {
             .map(text)
             .collect();
         assert_eq!(plain[1].chars().nth(1), Some('T'));
+    }
+
+    #[test]
+    fn mix_moves_toward_the_second_color() {
+        let (a, b) = (Color::Rgb(0, 100, 200), Color::Rgb(100, 0, 200));
+        assert_eq!(mix(a, b, 0.0), a);
+        assert_eq!(mix(a, b, 0.15), Color::Rgb(15, 85, 200));
+        assert_eq!(mix(Color::Reset, b, 0.5), Color::Reset);
+    }
+
+    #[test]
+    fn art_slot_hides_in_eject_and_insert_only() {
+        let s = &TPS_L2;
+        let grid = vec![vec![Color::Rgb(9, 9, 9); 10]; 10];
+        let mut v = view("Take On Me", Some(0.1), true, true);
+        v.cover = Some(&grid);
+        let slot = |v: &CassetteView| label(s, v)[0].spans[0].content.to_string();
+        for ph in [None, Some(Phase::Seat)] {
+            v.phase = ph;
+            assert_eq!(slot(&v), "▀");
+            assert_eq!(label(s, &v)[0].spans[0].style.fg, Some(Color::Rgb(9, 9, 9)));
+        }
+        for ph in [Phase::Eject(1), Phase::Insert(1)] {
+            v.phase = Some(ph);
+            assert_eq!(label(s, &v)[0].spans[0].content, " ".repeat(ART_W + 1));
+            assert_eq!(label(s, &v)[0].spans[0].style.bg, Some(s.label));
+        }
+    }
+
+    #[test]
+    fn placeholder_is_a_two_tone_paper_checker() {
+        let s = &TPS_L2;
+        let paper = mix(s.label, s.label_ink, 0.15);
+        let v = view("Take On Me", None, true, true);
+        for l in label(s, &v) {
+            for sp in &l.spans[..ART_W] {
+                let (f, b) = (sp.style.fg.unwrap(), sp.style.bg.unwrap());
+                assert!([f, b].iter().all(|c| *c == s.label || *c == paper));
+            }
+        }
     }
 
     #[test]
@@ -481,55 +709,256 @@ mod tests {
     #[test]
     fn counter_row_fills_its_width() {
         let s = &TPS_L2;
-        let r = counter_row(s, 72.4, Some(240.0), true, 34);
+        let r = counter_row(s, 72.4, Some(240.0), true, 34, [false; 3]);
         assert_eq!(r.width(), 34);
         let t = text(&r);
         assert!(t.starts_with("072  ━") && t.ends_with(" 1:12"), "{t}");
         assert_eq!(t.matches('●').count(), 1);
-        let t = text(&counter_row(s, 1234.0, None, true, 34)); // live: no head, wraps at 1000
+        let t = text(&counter_row(s, 1234.0, None, true, 34, [false; 3])); // live: no head, wraps at 1000
         assert!(t.starts_with("234  ─") && !t.contains('●') && t.ends_with("20:34"));
-        let t = text(&counter_row(s, 50.0, Some(100.0), false, 34)); // nothing playing
+        let t = text(&counter_row(s, 50.0, Some(100.0), false, 34, [false; 3])); // nothing playing
         assert!(t.starts_with("000  ─") && !t.contains('●') && t.trim_end().ends_with('─'));
         assert_eq!(
-            text(&counter_row(s, 0.0, Some(10.0), true, 34)).find('●'),
+            text(&counter_row(s, 0.0, Some(10.0), true, 34, [false; 3])).find('●'),
             Some(5)
         );
-        assert!(text(&counter_row(s, 10.0, Some(10.0), true, 34)).contains("━●  "));
+        assert!(text(&counter_row(s, 10.0, Some(10.0), true, 34, [false; 3])).contains("━●  "));
+        let r = counter_row(s, 72.0, Some(240.0), true, 34, [false, true, false]);
+        let colors: Vec<_> = r.spans[..3].iter().map(|sp| sp.style.fg).collect();
+        assert_eq!(colors, [Some(s.text), Some(s.dim), Some(s.text)]); // 0 7 2: the 7 rolls
         for w in [0, 5, 12, 13] {
-            counter_row(s, 5.0, Some(10.0), true, w); // tiny: no panic
+            counter_row(s, 5.0, Some(10.0), true, w, [true; 3]); // tiny: no panic
         }
     }
 
-    #[test]
-    fn key_caps_are_5_by_3_and_light_up() {
-        let s = &TPS_L2;
-        let lit = |l: &[Line], cap: usize| l[1].spans[cap * 3 + 1].style.fg == Some(s.accent);
-        for looping in [Loop::Off, Loop::One, Loop::All] {
-            let l = key_caps(s, true, true, true, looping);
-            assert_eq!(l.len(), 3);
-            assert!(l.iter().all(|r| r.width() == 30));
-            for cap in 0..6 {
-                let cell: String = l[1].spans[cap * 3..cap * 3 + 3]
+    /// Cap widths in order prev, play, pause, next, shuffle, loop.
+    const CAP_W: [usize; 6] = [6, 5, 6, 6, 5, 5];
+
+    /// Cell `cap` of each key row, with the color of its second column.
+    fn caps_cell(l: &[Line], cap: usize) -> Vec<(String, Option<ratatui::style::Color>)> {
+        l.iter()
+            .map(|row| {
+                let cells: Vec<(char, Style)> = row
+                    .spans
                     .iter()
-                    .map(|sp| sp.content.as_ref())
+                    .flat_map(|sp| sp.content.chars().map(move |c| (c, sp.style)))
                     .collect();
-                assert_eq!(cell.width(), 5, "{cell}");
+                let at = CAP_W[..cap].iter().sum::<usize>() + usize::from(cap > 3); // gap after next
+                let c = &cells[at..at + CAP_W[cap]];
+                (c.iter().map(|x| x.0).collect(), c[2].1.fg)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn key_caps_are_6_and_5_wide_4_rows_and_press_down() {
+        let s = &TPS_L2;
+        let down = |l: &[Line], cap: usize| {
+            let c = caps_cell(l, cap);
+            let d = c[0].0.trim().is_empty();
+            let wide = CAP_W[cap] == 6;
+            let (top, shadow) = if wide {
+                ("┌────┐", " ▀▀▀▀ ")
+            } else {
+                ("┌───┐", " ▀▀▀ ")
+            };
+            if d {
+                assert_eq!(c[1].0, top);
+                assert!(c[2].1 == Some(s.accent) && c[3].0.starts_with("└─")); // lit while down
+            } else {
+                assert!(c[0].0 == top && c[2].0.starts_with("└─"));
+                assert_eq!((c[3].0.as_str(), c[3].1), (shadow, Some(s.dim)));
+                assert_eq!(c[1].1, Some(s.text));
             }
-            assert_eq!(lit(&l, 5), looping != Loop::Off);
+            d
+        };
+        for looping in [Loop::Off, Loop::One, Loop::All] {
+            for pressed in [None, Some(Key::Next), Some(Key::Loop)] {
+                let l = key_caps(s, true, true, true, looping, pressed);
+                assert_eq!(l.len(), 4);
+                assert!(l.iter().all(|r| r.width() == CASSETTE_W));
+                assert_eq!(
+                    down(&l, 5),
+                    looping != Loop::Off || pressed == Some(Key::Loop)
+                );
+                assert_eq!(down(&l, 3), pressed == Some(Key::Next));
+            }
         }
+        let rows: Vec<String> = key_caps(s, false, false, false, Loop::One, None)
+            .iter()
+            .map(text)
+            .collect();
         assert_eq!(
-            text(&key_caps(s, false, false, false, Loop::One)[1]),
-            "│◀◀ ││ ▶ ││▮▮ ││▶▶ ││ ⤮ ││↻1 │"
+            rows,
+            [
+                "┌────┐┌───┐┌────┐┌────┐ ┌───┐     ",
+                "│ ◀◀ ││ ▶ ││ ▮▮ ││ ▶▶ │ │ ⤮ │┌───┐",
+                "└─b──┘└─p─┘└─p──┘└─n──┘ └─s─┘│↻1 │",
+                " ▀▀▀▀  ▀▀▀  ▀▀▀▀  ▀▀▀▀   ▀▀▀ └─l─┘",
+            ]
         );
-        assert_eq!(
-            text(&key_caps(s, false, false, false, Loop::Off)[2]),
-            "└─b─┘└─p─┘└─p─┘└─n─┘└─s─┘└─l─┘"
+        let all = |l: &[Line]| (0..6).map(|c| down(l, c)).collect::<Vec<_>>();
+        let l = key_caps(s, true, true, false, Loop::Off, None); // playing
+        assert_eq!(all(&l), [false, true, false, false, false, false]);
+        let l = key_caps(s, true, false, true, Loop::Off, None); // paused, shuffle on
+        assert_eq!(all(&l), [false, false, true, false, true, false]);
+        let l = key_caps(s, false, true, false, Loop::Off, Some(Key::Prev)); // nothing loaded
+        assert_eq!(all(&l), [true, false, false, false, false, false]);
+    }
+
+    #[test]
+    fn meter_row_lights_levels_peaks_and_the_red_top() {
+        let s = &TPS_L2;
+        let r = meter_row(s, Some([(8, 8), (6, 12)]));
+        assert_eq!(r.width(), CASSETTE_W);
+        assert_eq!(text(&r), "L ▮▮▮▮▮▮▮▮▯▯▯▯▯▯  R ▮▮▮▮▮▮▯▯▯▯▯▮▯▯");
+        let fgs: Vec<_> = r
+            .spans
+            .iter()
+            .filter(|sp| sp.content == "▮" || sp.content == "▯")
+            .map(|sp| sp.style.fg.unwrap())
+            .collect();
+        assert_eq!(fgs[0], s.meter_lo);
+        assert_eq!(fgs[8], s.dim); // unlit
+        assert_eq!(fgs[14 + 11], s.meter_hi); // the right peak, in the top three
+        assert_eq!(fgs[14 + 10], s.dim);
+        let full = text(&meter_row(s, Some([(14, 14), (14, 14)])));
+        assert_eq!(full.matches('▮').count(), 28);
+        let empty = text(&meter_row(s, None));
+        assert_eq!(empty, "L ▯▯▯▯▯▯▯▯▯▯▯▯▯▯  R ▯▯▯▯▯▯▯▯▯▯▯▯▯▯");
+        assert_eq!(text(&meter_row(s, Some([(0, 0), (0, 0)]))), empty);
+    }
+
+    #[test]
+    fn swap_slides_the_label_out_and_in() {
+        let mut v = view("New Song", Some(0.5), true, false);
+        v.channel = "New Band";
+        v.old = ("Old Song", "Old Band");
+        let label_rows = |v: &CassetteView| -> Vec<String> {
+            cassette(&TPS_L2, v)[2..7]
+                .iter()
+                .map(|l| text(l).chars().skip(3).take(LABEL_W).collect())
+                .collect()
+        };
+        let full_old = {
+            let mut o = view("Old Song", None, true, false);
+            o.channel = "Old Band";
+            label_rows(&o)
+        };
+        let full_new = label_rows(&v);
+        let blank = " ".repeat(LABEL_W);
+        v.phase = Some(Phase::Eject(0));
+        assert_eq!(label_rows(&v), full_old);
+        v.phase = Some(Phase::Eject(2)); // up two rows, the bottom two empty
+        let r = label_rows(&v);
+        assert_eq!(r[..3], full_old[2..]);
+        assert!(r[3..].iter().all(|x| *x == blank));
+        v.phase = Some(Phase::Insert(0));
+        assert!(label_rows(&v).iter().all(|x| *x == blank));
+        v.phase = Some(Phase::Insert(1)); // the label's bottom row shows at the top
+        let r = label_rows(&v);
+        assert_eq!(r[0], full_new[4]);
+        assert!(r[1..].iter().all(|x| *x == blank));
+        v.phase = Some(Phase::Insert(4));
+        assert_eq!(label_rows(&v)[..4], full_new[1..]);
+        v.phase = Some(Phase::Seat);
+        assert_eq!(label_rows(&v), full_new);
+        // Empty slot is the deck body color; mid-swap the reels are bare.
+        v.phase = Some(Phase::Insert(0));
+        let c = cassette(&TPS_L2, &v);
+        assert!(
+            c[4].spans
+                .iter()
+                .skip(1)
+                .take(1)
+                .all(|sp| sp.style.bg == Some(TPS_L2.body))
         );
-        let l = key_caps(s, true, true, false, Loop::Off); // playing
-        assert!(!lit(&l, 0) && lit(&l, 1) && !lit(&l, 2) && !lit(&l, 3) && !lit(&l, 4));
-        let l = key_caps(s, true, false, true, Loop::Off); // paused, shuffle on
-        assert!(!lit(&l, 1) && lit(&l, 2) && lit(&l, 4));
-        let l = key_caps(s, false, true, false, Loop::Off); // nothing loaded
-        assert!(!lit(&l, 1) && !lit(&l, 2));
+        assert_eq!(text(&c[9]), "│     │   (◐)        (◓)   │     │");
+        v.phase = Some(Phase::Seat);
+        assert_ne!(
+            text(&cassette(&TPS_L2, &v)[9]),
+            "│     │   (◐)        (◓)   │     │"
+        );
+        for k in 0..=9 {
+            for ph in [Phase::Eject(k), Phase::Insert(k)] {
+                v.phase = Some(ph);
+                assert!(
+                    cassette(&TPS_L2, &v)
+                        .iter()
+                        .all(|l| l.width() == CASSETTE_W)
+                );
+            }
+        }
+    }
+
+    /// Draws the deck pane with a flat accent-colored cover cached; returns the buffer, the
+    /// accent and the slot. `crisp`: `Some(built)` caches a protocol (or its failure marker).
+    fn render_cover(
+        path: art::ArtPath,
+        crisp: Option<bool>,
+    ) -> (ratatui::buffer::Buffer, Color, Rect) {
+        use crate::app::App;
+        use ratatui::{Terminal, backend::TestBackend};
+        use ratatui_image::picker::Picker;
+        let mut a = App::blank();
+        a.settings.thumbnails = true;
+        a.art_path = path;
+        a.picker = Some(Picker::halfblocks());
+        a.player.now_playing = Some("t".into());
+        a.queue.set(
+            vec![crate::youtube::Track {
+                title: "t".into(),
+                channel: String::new(),
+                id: "dQw4w9WgXcQ".into(),
+            }],
+            0,
+        );
+        let accent = a.shell().accent;
+        let Color::Rgb(ar, ag, ab) = accent else {
+            panic!("accent must be rgb")
+        };
+        let src = art::Source::from_pixel(40, 40, image::Rgb([ar, ag, ab]));
+        if let Some(built) = crisp {
+            let proto = art::protocol(a.picker.as_ref().unwrap(), &src, a.shell());
+            a.cover_proto = Some((a.cover_key().unwrap(), proto.filter(|_| built)));
+        }
+        a.art.push(("dQw4w9WgXcQ".into(), src));
+        let area = Rect::new(0, 0, PANE_W, 24);
+        let mut t = Terminal::new(TestBackend::new(PANE_W, 24)).unwrap();
+        t.draw(|f| draw(f, &a, area, false)).unwrap();
+        let top = area.height.saturating_sub(STACK_H + 1) / 2;
+        let slot = slot_rect(Rect::new(0, top, PANE_W, 24)).unwrap();
+        (t.backend().buffer().clone(), accent, slot)
+    }
+
+    #[test]
+    fn crisp_image_lands_on_the_label_slot() {
+        let (buf, accent, slot) = render_cover(art::ArtPath::Crisp, Some(true));
+        let cell = |x, y| &buf[(x, y)];
+        // The protocol's cells, not ours (we always draw "▀"), cover exactly the slot.
+        assert!((0..5).all(|dy| (0..10).all(|dx| {
+            let c = cell(slot.x + dx, slot.y + dy);
+            c.bg == accent && c.symbol() != "▀"
+        })));
+        assert_ne!(cell(slot.x - 1, slot.y).bg, accent);
+        assert_ne!(cell(slot.x + 10, slot.y + 1).bg, accent);
+        assert_ne!(cell(slot.x, slot.y + 5).bg, accent);
+        assert_ne!(cell(slot.x, slot.y - 1).bg, accent);
+        assert_eq!(slot_rect(Rect::new(0, 0, 20, 24)), None);
+    }
+
+    #[test]
+    fn failed_protocol_falls_back_to_half_blocks_and_off_draws_nothing() {
+        // The failure marker (hook-free: the cache stores `None` for the key).
+        let (buf, accent, slot) = render_cover(art::ArtPath::Crisp, Some(false));
+        assert!((0..5).all(|dy| (0..10).all(|dx| {
+            let c = &buf[(slot.x + dx, slot.y + dy)];
+            c.symbol() == "▀" && c.fg == accent && c.bg == accent
+        })));
+        let (buf, accent, slot) = render_cover(art::ArtPath::Off, None);
+        assert!((0..5).all(|dy| (0..10).all(|dx| {
+            let c = &buf[(slot.x + dx, slot.y + dy)];
+            c.symbol() != "▀" && c.bg != accent
+        })));
     }
 }

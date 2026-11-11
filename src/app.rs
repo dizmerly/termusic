@@ -1,18 +1,24 @@
 //! Application state and key handling.
+use crate::anim::{Anim, Key, by_volume};
 use crate::cmd::{self, Cmd, Event};
 use crate::commands;
 use crate::history::{self, Entry};
 use crate::player::Player;
 use crate::queue::{Loop, Queue};
+use crate::remote::{self, Request, ShellInfo, State};
 use crate::settings::Settings;
 use crate::theme::{self, Shell};
 use crate::youtube::{self, Track};
-use crate::{auth, net};
+use crate::{art, auth, net};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui_image::{picker::Picker, protocol::Protocol};
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::watch;
 
 /// Results of background network tasks, applied to `App` by `tick`.
 pub enum Msg {
@@ -29,7 +35,16 @@ pub enum Msg {
     PlaylistTracks(String, Vec<Track>),
     /// A background file write failed.
     SaveFailed(String),
+    /// Cover art fetched for the video id (`None`: failed, nothing to show).
+    Art(String, Option<art::Source>),
+    /// A control-socket request; the reply carries the state after applying it.
+    Remote(Result<Request, String>, remote::Reply),
 }
+
+/// Covers kept in memory.
+const ART_CACHE: usize = 8;
+/// Control-socket requests handled per `tick`.
+const REMOTE_PER_TICK: usize = 32;
 
 /// Serializes background writes so they land in the order they were requested.
 static IO: Mutex<()> = Mutex::new(());
@@ -89,12 +104,25 @@ impl Screen {
 pub enum Row {
     Volume,
     Shell,
+    CoverArt,
+    Animations,
+    Hiss,
+    HissLevel,
     HistoryFile,
     ClearHistory,
 }
 
 impl Row {
-    pub const ALL: [Row; 4] = [Row::Volume, Row::Shell, Row::HistoryFile, Row::ClearHistory];
+    pub const ALL: [Row; 8] = [
+        Row::Volume,
+        Row::Shell,
+        Row::CoverArt,
+        Row::Animations,
+        Row::Hiss,
+        Row::HissLevel,
+        Row::HistoryFile,
+        Row::ClearHistory,
+    ];
 }
 
 pub struct App {
@@ -117,6 +145,12 @@ pub struct App {
     pub busy: bool,
     tx: UnboundedSender<Msg>,
     rx: UnboundedReceiver<Msg>,
+    /// Latest state for control-socket clients.
+    state_tx: watch::Sender<State>,
+    /// The control socket this process bound and its (dev, ino), removed on exit if still ours.
+    pub(crate) sock: Option<(PathBuf, (u64, u64))>,
+    /// Held for the life of the process: it says we own the control socket.
+    lock: Option<std::fs::File>,
     /// The search field has focus (typing goes there); the tab stays what it was.
     pub searching: bool,
     /// Selection in the active tab's list.
@@ -145,7 +179,28 @@ pub struct App {
     resume_at: u64,
     /// First visible line of the help screen.
     pub help_scroll: u16,
+    pub anim: Anim,
+    /// Decoded covers by video id, oldest first.
+    pub art: Vec<(String, art::Source)>,
+    /// Ids whose cover is cached or in flight; dropped on eviction or a failed fetch.
+    art_tried: HashSet<String>,
+    /// How covers are drawn this session (decided once at startup).
+    pub art_path: art::ArtPath,
+    /// The terminal's image picker; kept only for `ArtPath::Crisp`.
+    pub picker: Option<Picker>,
+    /// The built image protocol for the current cover key; `None` inside: it failed, use half-blocks.
+    pub cover_proto: Option<(CoverKey, Option<Protocol>)>,
+    /// The half-block / off notice was already shown this session.
+    art_noted: bool,
+    /// Test hooks: count protocol builds, force one to fail.
+    #[cfg(test)]
+    cover_builds: usize,
+    #[cfg(test)]
+    fail_cover: bool,
 }
+
+/// What a built cover protocol depends on: track id, shell id, cell pixel size.
+pub type CoverKey = (String, &'static str, (u16, u16));
 
 impl App {
     pub fn new() -> Self {
@@ -154,7 +209,28 @@ impl App {
             std::env::var_os("TERMUSIC_HISTORY"),
             crate::settings::config_dir(),
         );
-        Self::with_paths(settings, path)
+        let mut a = Self::with_paths(settings, path);
+        a.serve_remote(remote::socket_path());
+        a
+    }
+
+    /// Bind the control socket at `path` and serve it; on failure say why in the status line.
+    pub(crate) fn serve_remote(&mut self, path: Option<PathBuf>) {
+        let bound = match &path {
+            Some(p) => remote::bind(p),
+            None => Err("remote control: no config directory".into()),
+        };
+        match (bound, path) {
+            (Ok(b), Some(path)) => {
+                self.sock = Some((path, b.id));
+                self.lock = Some(b.lock);
+                self.state_tx.send_replace(self.snapshot());
+                remote::serve(b.listener, self.tx.clone(), self.state_tx.subscribe());
+            }
+            (Err(e), _) if self.status.is_empty() => self.status = e,
+            (Err(e), _) => self.status = format!("{}; {e}", self.status),
+            (Ok(_), None) => {}
+        }
     }
 
     /// Tests use this with no path so they never touch the real config.
@@ -173,6 +249,11 @@ impl App {
             Screen::Offline
         };
         let (tx, rx) = unbounded_channel();
+        let (state_tx, _) = watch::channel(State::default());
+        let mut player = Player::new(settings.volume);
+        player.meters = settings.animations;
+        player.hiss_on = settings.hiss;
+        player.hiss_level = settings.hiss_level;
         Self {
             history: history_path
                 .as_deref()
@@ -182,10 +263,21 @@ impl App {
             confirm_clear: false,
             playing_id: None,
             resume_at: 0,
-            player: Player::new(settings.volume),
+            player,
             settings,
             setting_row: 0,
             help_scroll: 0,
+            anim: Anim::new(Instant::now()),
+            art: Vec::new(),
+            art_tried: HashSet::new(),
+            art_path: art::ArtPath::HalfBlocks,
+            picker: None,
+            cover_proto: None,
+            art_noted: false,
+            #[cfg(test)]
+            cover_builds: 0,
+            #[cfg(test)]
+            fail_cover: false,
             playlists: Vec::new(),
             from_playlist: false,
             #[cfg(test)]
@@ -194,6 +286,9 @@ impl App {
             busy: false,
             tx,
             rx,
+            state_tx,
+            sock: None,
+            lock: None,
             screen,
             stack: Vec::new(),
             input: String::new(),
@@ -219,8 +314,159 @@ impl App {
     fn cycle_shell(&mut self, step: isize) {
         let n = theme::SHELLS.len() as isize;
         let i = (theme::shell_index(&self.settings.shell) as isize + step).rem_euclid(n);
-        self.settings.shell = theme::SHELLS[i as usize].id.into();
+        self.set_shell(theme::SHELLS[i as usize].id);
+    }
+
+    /// Pick a shell by id and save it; false (nothing changed) for an unknown id.
+    pub fn set_shell(&mut self, id: &str) -> bool {
+        let Some(sh) = theme::SHELLS.iter().find(|s| s.id == id) else {
+            return false;
+        };
+        self.settings.shell = sh.id.into();
         self.save_settings();
+        true
+    }
+
+    /// Absolute volume, 0..=100 (clamped), through the same path as `Cmd::Volume`.
+    pub fn set_volume(&mut self, v: u8) {
+        let d = i32::from(v.min(100)) - i32::from(self.player.volume);
+        self.dispatch(Cmd::Volume(d));
+    }
+
+    pub fn set_shuffle(&mut self, on: bool) {
+        if self.queue.shuffle != on {
+            self.queue.toggle_shuffle();
+        }
+    }
+
+    pub fn set_loop(&mut self, l: Loop) {
+        self.queue.looping = l;
+        self.status = match l {
+            Loop::One => "loop: this track",
+            Loop::All => "loop: whole queue",
+            Loop::Off => "loop: off",
+        }
+        .into();
+        if let Err(e) = self.player.set_loop_file(l == Loop::One) {
+            self.status = e.to_string();
+        }
+    }
+
+    /// Turn animations on or off (Settings today, the control socket later) and save the choice.
+    pub fn set_animations(&mut self, on: bool) {
+        self.settings.animations = on;
+        self.player.meters = on;
+        self.save_settings();
+    }
+
+    /// Cover art on or off and save the choice; turning it on fetches the loaded track's.
+    pub fn set_thumbnails(&mut self, on: bool) {
+        self.settings.thumbnails = on;
+        if on && !self.art_noted {
+            let note = match self.art_path {
+                art::ArtPath::Crisp => None,
+                art::ArtPath::HalfBlocks => {
+                    Some("cover art: half-block mode (no image protocol here)")
+                }
+                art::ArtPath::Off => Some("cover art: off (TERMUSIC_ART=off)"),
+            };
+            if let Some(n) = note {
+                self.status = n.into();
+                self.art_noted = true;
+            }
+        }
+        if on {
+            self.request_current_art();
+            if let Some(id) = self.player.preloaded_id().map(str::to_owned) {
+                self.request_art(&id);
+            }
+        }
+        self.save_settings();
+    }
+
+    /// Ask for the loaded current track's cover (a no-op when nothing plays).
+    fn request_current_art(&mut self) {
+        let id = self
+            .player
+            .now_playing
+            .as_ref()
+            .and_then(|_| self.queue.current())
+            .map(|t| t.id.clone());
+        if let Some(id) = id {
+            self.request_art(&id);
+        }
+    }
+
+    /// Fetch a track's cover unless cached or in flight (`art_tried`). Failures stay silent: no status, no Offline.
+    fn request_art(&mut self, id: &str) {
+        if !self.settings.thumbnails
+            || self.art_path == art::ArtPath::Off
+            || self.screen == Screen::Offline
+            || !art::valid_id(id)
+            || !self.art_tried.insert(id.to_owned())
+        {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return; // unit tests: no runtime, nothing to fetch
+        };
+        let (tx, id) = (self.tx.clone(), id.to_owned());
+        rt.spawn(async move {
+            let src = art::fetch(&id).await;
+            let _ = tx.send(Msg::Art(id, src));
+        });
+    }
+
+    /// The cover protocol's cache key for the playing track; `None` unless the crisp path applies.
+    pub fn cover_key(&self) -> Option<CoverKey> {
+        let font = self.picker.as_ref()?.font_size();
+        let title = self.player.now_playing.as_deref()?;
+        let t = self.queue.current().filter(|t| t.title == title)?;
+        let on = self.settings.thumbnails && self.art_path == art::ArtPath::Crisp;
+        on.then(|| (t.id.clone(), self.shell().id, (font.width, font.height)))
+    }
+
+    /// Build the cover protocol when the key changed and the source is cached.
+    fn sync_cover(&mut self) {
+        let Some(key) = self.cover_key() else { return };
+        if self.cover_proto.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        let (Some((_, src)), Some(picker)) =
+            (self.art.iter().find(|(id, _)| *id == key.0), &self.picker)
+        else {
+            return;
+        };
+        #[allow(unused_mut)]
+        let mut proto = art::protocol(picker, src, self.shell());
+        #[cfg(test)]
+        {
+            self.cover_builds += 1;
+            if self.fail_cover {
+                proto = None;
+            }
+        }
+        self.cover_proto = Some((key, proto));
+    }
+
+    /// Tape hiss on or off; it starts with the next playing frame and is saved.
+    pub fn set_hiss(&mut self, on: bool) {
+        self.settings.hiss = on;
+        self.player.hiss_on = on;
+        self.player.sync_hiss();
+        self.save_settings();
+    }
+
+    /// Hiss level, 0..=100 (clamped); the running hiss follows at once.
+    pub fn set_hiss_level(&mut self, level: u8) {
+        self.player.set_hiss_level(level);
+        self.settings.hiss_level = self.player.hiss_level;
+        self.save_settings();
+    }
+
+    /// Something on screen moves, so the loop runs at the frame rate.
+    pub fn animating(&self) -> bool {
+        self.settings.animations && (self.player.playing || self.anim.busy())
     }
 
     /// Run a network task off the UI thread; offline is detected first and reported as `Msg::Offline`.
@@ -284,8 +530,12 @@ impl App {
 
     /// Apply finished background work and detect the end of the current track. Called every frame.
     pub fn tick(&mut self) {
+        let mut remote = 0;
         while let Ok(m) = self.rx.try_recv() {
-            if !matches!(m, Msg::LoginUrl(_) | Msg::SaveFailed(_)) {
+            if !matches!(
+                m,
+                Msg::LoginUrl(_) | Msg::SaveFailed(_) | Msg::Art(..) | Msg::Remote(..)
+            ) {
                 self.busy = false;
             }
             // Replies never move focus: whoever is typing keeps typing.
@@ -300,7 +550,24 @@ impl App {
                     self.login_url = None;
                 }
                 Msg::LoginUrl(u) => self.login_url = Some(u),
+                Msg::Remote(req, reply) => {
+                    remote += 1;
+                    // Publish first: the reply must carry the state this request produced.
+                    reply.send(req.and_then(|r| self.apply(r)).map(|()| self.publish()));
+                }
                 Msg::SaveFailed(e) => self.status = e,
+                Msg::Art(id, Some(src)) => {
+                    self.art.retain(|(i, _)| *i != id);
+                    self.art.push((id, src));
+                    if self.art.len() > ART_CACHE {
+                        let (old, _) = self.art.remove(0);
+                        self.art_tried.remove(&old);
+                    }
+                }
+                // A failed fetch may be asked again at the next natural trigger, never in a loop.
+                Msg::Art(id, None) => {
+                    self.art_tried.remove(&id);
+                }
                 Msg::LoggedIn => {
                     self.login_url = None;
                     self.status = "signed in".into();
@@ -343,13 +610,147 @@ impl App {
                 }
             }
             self.searching = typing && !focus_list;
+            if remote >= REMOTE_PER_TICK {
+                break; // a flooding client must not stall the frame; the rest waits for the next tick
+            }
         }
         self.sync_preload();
+        self.sync_cover();
         match self.player.tick() {
             Some(true) => self.on_event(Event::TrackEnded),
             Some(false) => self.on_event(Event::TrackFailed),
             None => {}
         }
+        let p = &self.player;
+        let count = if p.now_playing.is_some() {
+            p.position.max(0.0) as u64 % 1000
+        } else {
+            0
+        };
+        if p.now_playing.is_none() {
+            self.anim.shown = None; // the deck is empty: the next tape has nothing to eject
+        }
+        let levels = p
+            .levels()
+            .filter(|_| p.playing)
+            .map(|(l, r)| (by_volume(l, p.volume), by_volume(r, p.volume)));
+        self.anim.advance(Instant::now(), p.playing, count, levels);
+        self.publish();
+    }
+
+    /// Do what a control-socket client asked, through the same methods the keys use.
+    fn apply(&mut self, r: Request) -> Result<(), String> {
+        match r {
+            Request::Cmd(c) => {
+                self.cmd_gate(c, commands::disabled)?;
+                self.dispatch(c);
+            }
+            Request::Volume(v) => self.set_volume(v),
+            Request::Loop(l) => {
+                let changed = self.queue.looping != l;
+                self.set_loop(l);
+                if changed {
+                    self.press(Key::Loop);
+                }
+            }
+            Request::Shuffle(on) => {
+                let changed = self.queue.shuffle != on;
+                self.set_shuffle(on);
+                if changed {
+                    self.press(Key::Shuffle);
+                }
+            }
+            Request::Shell(id) => {
+                self.set_shell(&id);
+            }
+            Request::Thumbnails(on) => self.set_thumbnails(on),
+            Request::Animations(on) => self.set_animations(on),
+            Request::Hiss(on) => self.set_hiss(on),
+            Request::HissLevel(l) => self.set_hiss_level(l),
+            Request::GetState => {}
+        }
+        Ok(())
+    }
+
+    /// The keyboard's gates for a playback command: not offline, not disabled.
+    pub(crate) fn cmd_gate(&self, c: Cmd, disabled: impl Fn(char) -> bool) -> Result<(), String> {
+        if self.screen == Screen::Offline {
+            return Err("offline".into());
+        }
+        let key = match c {
+            Cmd::PlayPause => commands::pause::KEY,
+            Cmd::Next => commands::skip::KEY,
+            Cmd::Prev => commands::prev::KEY,
+            Cmd::Seek(s) if s < 0 => commands::seek_back::KEY,
+            Cmd::Seek(_) => commands::seek_forward::KEY,
+            Cmd::Volume(d) if d < 0 => commands::volume_down::KEY,
+            Cmd::Volume(_) => commands::volume_up::KEY,
+            Cmd::ToggleShuffle => commands::shuffle::KEY,
+            Cmd::CycleLoop => commands::loop_track::KEY,
+        };
+        if disabled(key) {
+            return Err("disabled".into());
+        }
+        Ok(())
+    }
+
+    /// Show a transport cap pressed, if animations are on.
+    fn press(&mut self, k: Key) {
+        if self.settings.animations {
+            self.anim.pressed = Some((k, Instant::now()));
+        }
+    }
+
+    /// What control-socket clients see now (no IO); position is whole seconds.
+    pub fn snapshot(&self) -> State {
+        let p = &self.player;
+        let loaded = p.now_playing.is_some();
+        let cur = self.queue.current().filter(|_| loaded);
+        State {
+            title: cur.map(|t| t.title.clone()),
+            channel: cur.map(|t| t.channel.clone()),
+            id: cur.map(|t| t.id.clone()),
+            loaded,
+            paused: loaded && !p.playing,
+            position: if loaded && p.position.is_finite() {
+                p.position.max(0.0).floor()
+            } else {
+                0.0
+            },
+            duration: p.duration.filter(|_| loaded),
+            volume: p.volume,
+            looping: match self.queue.looping {
+                Loop::Off => "off",
+                Loop::One => "one",
+                Loop::All => "all",
+            },
+            shuffle: self.queue.shuffle,
+            shell: self.shell().id,
+            shells: theme::SHELLS
+                .iter()
+                .map(|s| ShellInfo {
+                    id: s.id,
+                    name: s.name,
+                })
+                .collect(),
+            thumbnails: self.settings.thumbnails,
+            animations: self.settings.animations,
+            hiss: self.settings.hiss,
+            hiss_level: self.settings.hiss_level,
+        }
+    }
+
+    /// Send the snapshot to socket clients if it changed; returns it.
+    fn publish(&self) -> State {
+        let s = self.snapshot();
+        self.state_tx.send_if_modified(|c| {
+            let changed = *c != s;
+            if changed {
+                *c = s.clone();
+            }
+            changed
+        });
+        s
     }
 
     /// Keep the background preload matching the queue: drop a stale one, start one near the end.
@@ -361,6 +762,7 @@ impl App {
         }
         if let Some(t) = want.filter(|t| self.player.wants_preload(&t.id)) {
             self.player.preload(&t);
+            self.request_art(&t.id);
         }
     }
 
@@ -369,6 +771,12 @@ impl App {
         match e {
             Event::TrackStarted(id) => {
                 self.playing_id = Some(id.clone());
+                self.request_art(&id);
+                let title = self.player.now_playing.clone().unwrap_or_default();
+                let channel = self.queue.current().filter(|t| t.id == id);
+                let channel = channel.map_or(String::new(), |t| t.channel.clone());
+                let animate = self.settings.animations;
+                self.anim.swap_to((title, channel), animate, Instant::now());
                 if let Some(t) = self.queue.current().filter(|t| t.id == id).cloned() {
                     history::push(&mut self.history, t);
                     self.save_history();
@@ -387,6 +795,7 @@ impl App {
             }
             Event::Connection(true) => {
                 self.set_tab(Screen::Results);
+                self.request_current_art();
             }
             Event::Connection(false) => {
                 self.save_sel();
@@ -399,7 +808,33 @@ impl App {
 
     /// Perform a playback command (from a key today; media keys later). Errors go to the status bar.
     pub fn dispatch(&mut self, c: Cmd) {
-        let r = match c {
+        // Reels hold when paused or idle: whirr only while a track plays.
+        if self.settings.animations
+            && self.player.playing
+            && matches!(c, Cmd::Next | Cmd::Prev | Cmd::Seek(_))
+        {
+            self.anim.whirr = Some(Instant::now());
+        }
+        let r = self.run(c);
+        if let Err(e) = r {
+            self.status = e.to_string();
+        }
+        let key = match c {
+            Cmd::PlayPause if self.player.playing => Some(Key::Play),
+            Cmd::PlayPause => Some(Key::Pause),
+            Cmd::Next => Some(Key::Next),
+            Cmd::Prev => Some(Key::Prev),
+            Cmd::ToggleShuffle => Some(Key::Shuffle),
+            Cmd::CycleLoop => Some(Key::Loop),
+            Cmd::Seek(_) | Cmd::Volume(_) => None,
+        };
+        if let Some(k) = key {
+            self.press(k);
+        }
+    }
+
+    fn run(&mut self, c: Cmd) -> anyhow::Result<()> {
+        match c {
             Cmd::PlayPause => self.player.toggle_pause(),
             // Advances even on loop-one: the user asked for another track.
             Cmd::Next => {
@@ -425,18 +860,9 @@ impl App {
                 Ok(())
             }
             Cmd::CycleLoop => {
-                self.queue.looping = self.queue.looping.cycle();
-                self.status = match self.queue.looping {
-                    Loop::One => "loop: this track",
-                    Loop::All => "loop: whole queue",
-                    Loop::Off => "loop: off",
-                }
-                .into();
-                self.player.set_loop_file(self.queue.looping == Loop::One)
+                self.set_loop(self.queue.looping.cycle());
+                Ok(())
             }
-        };
-        if let Err(e) = r {
-            self.status = e.to_string();
         }
     }
 
@@ -597,6 +1023,12 @@ impl App {
         self.record_position();
         self.settings.volume = self.player.volume;
         self.settings.save();
+        if let Some((p, id)) = self.sock.take()
+            && remote::file_id(&p) == Some(id)
+        {
+            let _ = std::fs::remove_file(p); // only our own socket, not one a later bind put there
+        }
+        self.lock = None;
         if let Some(p) = &self.history_path {
             let _ = history::save(p, &self.history);
         }
@@ -729,6 +1161,21 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.setting_row = self.setting_row.saturating_sub(1)
+            }
+            KeyCode::Enter | KeyCode::Left | KeyCode::Right if row == Row::CoverArt => {
+                self.set_thumbnails(!self.settings.thumbnails)
+            }
+            KeyCode::Enter | KeyCode::Left | KeyCode::Right if row == Row::Animations => {
+                self.set_animations(!self.settings.animations)
+            }
+            KeyCode::Enter | KeyCode::Left | KeyCode::Right if row == Row::Hiss => {
+                self.set_hiss(!self.settings.hiss)
+            }
+            KeyCode::Left | KeyCode::Char('-') if row == Row::HissLevel => {
+                self.set_hiss_level(self.settings.hiss_level.saturating_sub(cmd::STEP as u8))
+            }
+            KeyCode::Right | KeyCode::Char('+') if row == Row::HissLevel => {
+                self.set_hiss_level(self.settings.hiss_level.saturating_add(cmd::STEP as u8))
             }
             KeyCode::Left if row == Row::Shell => self.cycle_shell(-1),
             KeyCode::Right if row == Row::Shell => self.cycle_shell(1),
@@ -1387,6 +1834,41 @@ mod tests {
         press(&mut a, KeyCode::Char('j'));
         assert_eq!(Row::ALL[a.setting_row], Row::Shell);
         press(&mut a, KeyCode::Char('j'));
+        assert_eq!(Row::ALL[a.setting_row], Row::CoverArt);
+        press(&mut a, KeyCode::Enter);
+        assert!(a.settings.thumbnails);
+        press(&mut a, KeyCode::Right);
+        press(&mut a, KeyCode::Left);
+        assert!(a.settings.thumbnails && a.player.volume == 45); // on, off, on
+        press(&mut a, KeyCode::Char('j'));
+        assert_eq!(Row::ALL[a.setting_row], Row::Animations);
+        assert!(a.settings.animations);
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Right);
+        press(&mut a, KeyCode::Left);
+        assert!(!a.settings.animations && a.player.volume == 45); // toggled, volume untouched
+        press(&mut a, KeyCode::Char('j'));
+        assert_eq!(Row::ALL[a.setting_row], Row::Hiss);
+        press(&mut a, KeyCode::Enter); // on: no track loaded, so no hiss mpv yet
+        assert!(a.settings.hiss && a.player.hiss_on);
+        press(&mut a, KeyCode::Char('j'));
+        assert_eq!(Row::ALL[a.setting_row], Row::HissLevel);
+        press(&mut a, KeyCode::Right);
+        press(&mut a, KeyCode::Char('+'));
+        assert_eq!((a.settings.hiss_level, a.player.hiss_level), (40, 40));
+        for _ in 0..12 {
+            press(&mut a, KeyCode::Right); // clamps at 100
+        }
+        assert_eq!(a.settings.hiss_level, 100);
+        for _ in 0..25 {
+            press(&mut a, KeyCode::Char('-')); // and at 0
+        }
+        assert_eq!((a.settings.hiss_level, a.player.volume), (0, 45));
+        press(&mut a, KeyCode::Char('k'));
+        press(&mut a, KeyCode::Left); // off again
+        assert!(!a.settings.hiss && !a.player.hiss_on);
+        press(&mut a, KeyCode::Char('j'));
+        press(&mut a, KeyCode::Char('j'));
         assert_eq!(Row::ALL[a.setting_row], Row::HistoryFile);
         a.history_path = Some("/h.json".into());
         press(&mut a, KeyCode::Enter);
@@ -1873,6 +2355,88 @@ mod tests {
     }
 
     #[test]
+    fn animating_truth_table() {
+        let mut a = app();
+        for (on, playing, whirr, want) in [
+            (true, false, false, false),
+            (true, true, false, true),
+            (true, false, true, false), // a stale whirr does not wake a paused deck
+            (false, true, false, false),
+            (false, false, true, false),
+        ] {
+            a.settings.animations = on;
+            a.player.playing = playing;
+            a.anim.whirr = whirr.then_some(a.anim.now);
+            assert_eq!(a.animating(), want, "{on} {playing} {whirr}");
+        }
+        a.anim.whirr = Some(a.anim.now - std::time::Duration::from_secs(1)); // over
+        a.settings.animations = true;
+        a.player.playing = false;
+        assert!(!a.animating());
+    }
+
+    #[test]
+    fn dispatch_presses_the_cap_of_its_command() {
+        let mut a = app();
+        let key = |a: &App| a.anim.pressed.map(|(k, _)| k);
+        a.dispatch(Cmd::ToggleShuffle);
+        assert_eq!(key(&a), Some(Key::Shuffle));
+        a.dispatch(Cmd::PlayPause); // nothing loaded: stays paused, so Pause shows the press
+        assert_eq!(key(&a), Some(Key::Pause));
+        a.dispatch(Cmd::CycleLoop);
+        assert_eq!(key(&a), Some(Key::Loop));
+        a.dispatch(Cmd::Volume(5)); // no cap: the last press stays
+        assert_eq!(key(&a), Some(Key::Loop));
+        a.anim.pressed = None;
+        a.settings.animations = false;
+        a.dispatch(Cmd::ToggleShuffle);
+        assert_eq!(key(&a), None);
+    }
+
+    #[test]
+    fn track_started_swaps_the_tape() {
+        let mut a = app();
+        a.queue.set(a.results.clone(), 3);
+        a.player.now_playing = Some("3".into());
+        a.on_event(Event::TrackStarted("3".into()));
+        a.anim.now = a.anim.swap.as_ref().unwrap().0 + std::time::Duration::from_millis(200);
+        assert_eq!(a.anim.phase(), Some(crate::anim::Phase::Insert(0))); // first tape: no eject
+        assert_eq!(a.anim.shown, Some(("3".into(), String::new())));
+        a.player.now_playing = None;
+        a.tick(); // the deck emptied: nothing to eject next time
+        assert!(a.anim.shown.is_none());
+        a.settings.animations = false;
+        a.anim.swap = None;
+        a.on_event(Event::TrackStarted("3".into()));
+        assert!(a.anim.swap.is_none());
+    }
+
+    #[test]
+    fn seek_next_and_prev_whirr_only_with_animations() {
+        let mut a = app();
+        a.player.playing = true;
+        a.dispatch(Cmd::Seek(5));
+        assert!(a.anim.whirr.is_some());
+        a.anim.whirr = None;
+        a.settings.animations = false;
+        a.dispatch(Cmd::Prev);
+        a.dispatch(Cmd::Seek(-5));
+        assert!(a.anim.whirr.is_none());
+    }
+
+    #[test]
+    fn idle_or_paused_deck_does_not_whirr() {
+        let mut a = app();
+        for c in [Cmd::Next, Cmd::Seek(5), Cmd::Prev] {
+            a.dispatch(c); // empty deck
+            assert!(a.anim.whirr.is_none() && !a.anim.whirring()); // a cap press may still animate
+        }
+        a.player.now_playing = Some("1".into());
+        a.dispatch(Cmd::Seek(5)); // loaded but paused
+        assert!(a.anim.whirr.is_none() && !a.anim.whirring()); // a cap press may still animate
+    }
+
+    #[test]
     fn tabs_skip_the_ones_that_are_off() {
         let off = [false, false, true, false];
         let visited = |step| {
@@ -1893,5 +2457,263 @@ mod tests {
         assert_eq!(a.screen, Screen::History);
         assert_eq!(next_tab(1, 1, [false, true, true, true]), 0);
         assert_eq!(next_tab(0, 1, [false, true, true, true]), 0);
+    }
+
+    fn art_app(on: bool) -> App {
+        let mut a = app();
+        a.settings.thumbnails = on;
+        a
+    }
+
+    fn cover() -> art::Source {
+        art::Source::new(40, 40)
+    }
+
+    #[test]
+    fn request_art_skips_when_off_offline_invalid_or_tried() {
+        let id = "dQw4w9WgXcQ";
+        let mut a = art_app(false);
+        a.request_art(id);
+        assert!(a.art_tried.is_empty());
+        let mut a = art_app(true);
+        a.screen = Screen::Offline;
+        a.request_art(id);
+        a.screen = Screen::Results;
+        a.request_art("short");
+        assert!(a.art_tried.is_empty());
+        a.request_art(id);
+        assert_eq!(a.art_tried.len(), 1);
+        a.art_tried.clear();
+        a.art_tried.insert(id.into());
+        a.request_art(id); // already tried: still one entry, nothing new
+        assert_eq!(a.art_tried.len(), 1);
+    }
+
+    const NEXT_ID: &str = "aaaaaaaaaaa";
+
+    fn art_queue(a: &mut App) {
+        let t = |id: &str| Track {
+            title: id.into(),
+            channel: String::new(),
+            id: id.into(),
+        };
+        a.queue.set(vec![t(COVER_ID), t(NEXT_ID)], 0);
+    }
+
+    #[test]
+    fn track_started_alone_requests_the_current_id() {
+        let mut a = art_app(true);
+        art_queue(&mut a);
+        a.on_event(Event::TrackStarted(COVER_ID.into()));
+        assert_eq!(a.art_tried.len(), 1);
+        assert!(a.art_tried.contains(COVER_ID));
+    }
+
+    #[test]
+    fn preload_alone_requests_the_next_id_and_both_make_one_request_each() {
+        let mut a = art_app(true);
+        art_queue(&mut a);
+        a.player.fake_current(COVER_ID);
+        a.sync_preload();
+        assert_eq!(a.art_tried.len(), 1);
+        assert!(a.art_tried.contains(NEXT_ID));
+        a.on_event(Event::TrackStarted(COVER_ID.into()));
+        a.on_event(Event::TrackStarted(NEXT_ID.into()));
+        assert_eq!(a.art_tried.len(), 2);
+    }
+
+    #[test]
+    fn an_evicted_id_can_be_requested_again() {
+        let mut a = art_app(true);
+        a.request_art(COVER_ID);
+        a.tx.send(Msg::Art(COVER_ID.into(), Some(cover()))).unwrap();
+        for i in 0..8 {
+            a.tx.send(Msg::Art(i.to_string(), Some(cover()))).unwrap();
+        }
+        a.tick();
+        assert!(!a.art.iter().any(|(i, _)| i == COVER_ID));
+        assert!(!a.art_tried.contains(COVER_ID));
+        a.request_art(COVER_ID);
+        assert!(a.art_tried.contains(COVER_ID));
+    }
+
+    #[test]
+    fn a_failed_id_is_asked_again_on_its_next_track_started() {
+        let mut a = art_app(true);
+        art_queue(&mut a);
+        a.on_event(Event::TrackStarted(COVER_ID.into()));
+        a.tx.send(Msg::Art(COVER_ID.into(), None)).unwrap();
+        a.tick();
+        assert!(a.art_tried.is_empty()); // no retry loop: tick alone asks nothing
+        a.on_event(Event::TrackStarted(COVER_ID.into()));
+        assert!(a.art_tried.contains(COVER_ID));
+    }
+
+    #[test]
+    fn an_in_flight_id_is_not_requested_twice() {
+        let mut a = art_app(true);
+        a.request_art(COVER_ID);
+        a.art_tried.insert("marker".into());
+        a.request_art(COVER_ID);
+        a.on_event(Event::TrackStarted(COVER_ID.into()));
+        a.sync_preload();
+        assert_eq!(a.art_tried.len(), 2); // the id and the marker: nothing re-inserted
+        a.art_tried.remove("marker");
+        assert!(!a.art_tried.insert(COVER_ID.into())); // still marked in flight
+    }
+
+    #[test]
+    fn reconnecting_fetches_the_current_cover() {
+        let mut a = art_app(true);
+        art_queue(&mut a);
+        a.player.now_playing = Some(COVER_ID.into());
+        a.on_event(Event::Connection(false));
+        a.request_art(COVER_ID); // offline: skipped
+        assert!(a.art_tried.is_empty());
+        a.on_event(Event::Connection(true));
+        assert!(a.art_tried.contains(COVER_ID));
+    }
+
+    #[test]
+    fn turning_cover_art_on_also_requests_the_preloaded_track() {
+        let mut a = art_app(false);
+        a.player.fake_preload(NEXT_ID);
+        a.set_thumbnails(true);
+        assert!(a.art_tried.contains(NEXT_ID));
+    }
+
+    #[test]
+    fn turning_cover_art_on_requests_the_loaded_track() {
+        let id = "dQw4w9WgXcQ";
+        let mut a = art_app(false);
+        a.set_thumbnails(true); // nothing loaded
+        assert!(a.settings.thumbnails && a.art_tried.is_empty());
+        a.set_thumbnails(false);
+        a.queue.set(
+            vec![Track {
+                title: "t".into(),
+                channel: String::new(),
+                id: id.into(),
+            }],
+            0,
+        );
+        a.player.now_playing = Some("t".into());
+        a.set_thumbnails(true);
+        assert!(a.art_tried.contains(id));
+        a.set_thumbnails(false);
+        assert!(!a.settings.thumbnails);
+    }
+
+    #[test]
+    fn art_replies_are_cached_oldest_first_and_capped() {
+        let mut a = app();
+        let send = |a: &mut App, id: &str, src| {
+            a.tx.send(Msg::Art(id.into(), src)).unwrap();
+            a.tick();
+        };
+        for i in 0..9 {
+            send(&mut a, &i.to_string(), Some(cover())); // none is the current track
+        }
+        let ids = |a: &App| a.art.iter().map(|(i, _)| i.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&a), ["1", "2", "3", "4", "5", "6", "7", "8"]);
+        send(&mut a, "1", Some(cover())); // re-insert moves to the back
+        assert_eq!(ids(&a).last().map(String::as_str), Some("1"));
+        assert_eq!(a.art.len(), 8);
+        a.status = "keep".into();
+        a.busy = true;
+        send(&mut a, "new", None);
+        assert!(a.art.iter().all(|(i, _)| i != "new"));
+        assert!(a.status == "keep" && a.busy);
+    }
+
+    const COVER_ID: &str = "dQw4w9WgXcQ";
+
+    /// A crisp-path app with a track loaded and its cover cached (halfblocks picker in memory).
+    fn crisp_app() -> App {
+        let mut a = art_app(true);
+        a.art_path = art::ArtPath::Crisp;
+        a.picker = Some(Picker::halfblocks());
+        a.queue.set(
+            vec![Track {
+                title: "t".into(),
+                channel: String::new(),
+                id: COVER_ID.into(),
+            }],
+            0,
+        );
+        a.player.now_playing = Some("t".into());
+        a.art.push((COVER_ID.into(), cover()));
+        a
+    }
+
+    #[test]
+    fn notice_shows_once_on_half_blocks_and_off_never_on_crisp() {
+        let toggle = |a: &mut App| {
+            a.status.clear();
+            a.set_thumbnails(false);
+            a.set_thumbnails(true);
+        };
+        let mut a = art_app(false);
+        a.set_thumbnails(true);
+        assert_eq!(
+            a.status,
+            "cover art: half-block mode (no image protocol here)"
+        );
+        toggle(&mut a);
+        assert!(a.status.is_empty());
+        let mut a = art_app(false);
+        a.art_path = art::ArtPath::Off;
+        a.set_thumbnails(true);
+        assert_eq!(a.status, "cover art: off (TERMUSIC_ART=off)");
+        toggle(&mut a);
+        assert!(a.status.is_empty());
+        let mut a = art_app(false);
+        a.art_path = art::ArtPath::Crisp;
+        a.set_thumbnails(true);
+        assert!(a.status.is_empty());
+    }
+
+    #[test]
+    fn off_path_requests_nothing() {
+        let mut a = art_app(true);
+        a.art_path = art::ArtPath::Off;
+        a.request_art(COVER_ID);
+        assert!(a.art_tried.is_empty());
+    }
+
+    #[test]
+    fn cover_protocol_is_built_once_per_key_and_rebuilt_on_shell_change() {
+        let mut a = crisp_app();
+        a.sync_cover();
+        a.sync_cover();
+        assert_eq!(a.cover_builds, 1);
+        assert!(a.cover_proto.as_ref().is_some_and(|(_, p)| p.is_some()));
+        a.cycle_shell(1);
+        a.sync_cover();
+        a.sync_cover();
+        assert_eq!(a.cover_builds, 2);
+        assert_eq!(a.cover_proto.as_ref().unwrap().0.1, a.shell().id);
+    }
+
+    #[test]
+    fn failed_cover_build_is_remembered_not_retried() {
+        let mut a = crisp_app();
+        a.fail_cover = true;
+        a.sync_cover();
+        a.sync_cover();
+        assert_eq!(a.cover_builds, 1);
+        assert!(a.cover_proto.as_ref().is_some_and(|(_, p)| p.is_none()));
+    }
+
+    #[test]
+    fn no_cover_protocol_without_the_crisp_path_or_a_cached_source() {
+        let mut a = crisp_app();
+        a.art.clear();
+        a.sync_cover();
+        assert!(a.cover_proto.is_none());
+        a.art.push((COVER_ID.into(), cover()));
+        a.art_path = art::ArtPath::HalfBlocks;
+        a.sync_cover();
+        assert!(a.cover_proto.is_none() && a.cover_builds == 0);
     }
 }

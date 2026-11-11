@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_VOLUME: u8 = 70;
+pub const DEFAULT_HISS_LEVEL: u8 = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -12,6 +13,13 @@ pub struct Settings {
     pub history_path: Option<PathBuf>,
     /// Id of the color shell (`theme::SHELLS`); kept as written, an unknown id draws the default.
     pub shell: String,
+    /// Moving reels, keys, tape swap and level meters; off draws the deck still.
+    pub animations: bool,
+    /// Pixel-art cover of the playing track on the cassette label (fetches its thumbnail).
+    pub thumbnails: bool,
+    /// Tape hiss under the music, at `hiss_level` percent of the volume.
+    pub hiss: bool,
+    pub hiss_level: u8,
 }
 
 impl Default for Settings {
@@ -20,6 +28,10 @@ impl Default for Settings {
             volume: DEFAULT_VOLUME,
             history_path: None,
             shell: crate::theme::SHELLS[0].id.into(),
+            animations: true,
+            thumbnails: false,
+            hiss: false,
+            hiss_level: DEFAULT_HISS_LEVEL,
         }
     }
 }
@@ -79,6 +91,7 @@ impl Settings {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         s.volume = s.volume.min(100);
+        s.hiss_level = s.hiss_level.min(100);
         s
     }
 
@@ -109,18 +122,26 @@ mod tests {
             volume: 33,
             history_path: Some("/h.json".into()),
             shell: "amber".into(),
+            animations: false,
+            thumbnails: true,
+            hiss: true,
+            hiss_level: 45,
         }
         .save_to(&p)
         .unwrap();
         let got = Settings::load_from(&p);
         assert_eq!((got.volume, got.history_path), (33, Some("/h.json".into())));
         assert_eq!(got.shell, "amber");
+        assert!(!got.animations && got.thumbnails);
+        assert_eq!((got.hiss, got.hiss_level), (true, 45));
         std::fs::write(&p, "{not json").unwrap();
         assert_eq!(Settings::load_from(&p), Settings::default()); // corrupt
         std::fs::write(&p, "{}").unwrap();
         assert_eq!(Settings::load_from(&p), Settings::default()); // missing field
         std::fs::write(&p, r#"{"volume":250}"#).unwrap();
         assert_eq!(Settings::load_from(&p).volume, 100); // clamped
+        std::fs::write(&p, r#"{"hiss_level":250}"#).unwrap();
+        assert_eq!(Settings::load_from(&p).hiss_level, 100);
         std::fs::write(&p, r#"{"shell":"bogus"}"#).unwrap();
         let got = Settings::load_from(&p);
         assert_eq!(got.shell, "bogus"); // kept, so saving does not rewrite it

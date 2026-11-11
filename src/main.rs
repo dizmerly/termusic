@@ -1,4 +1,6 @@
+mod anim;
 mod app;
+mod art;
 mod auth;
 mod cmd;
 mod commands;
@@ -7,6 +9,7 @@ mod history;
 mod net;
 mod player;
 mod queue;
+mod remote;
 mod settings;
 mod theme;
 mod ui;
@@ -72,11 +75,17 @@ fn run_tui() -> Result<()> {
         );
     }
     let mut app = app::App::new();
+    (app.art_path, app.picker) = art::detect();
     let res = (|| -> Result<()> {
         while !app.quit {
             app.tick();
             terminal.draw(|f| ui::draw(f, &mut app))?;
-            if event::poll(Duration::from_millis(200))?
+            let wait = if app.animating() {
+                anim::FRAME
+            } else {
+                Duration::from_millis(200)
+            };
+            if event::poll(wait)?
                 && let Event::Key(k) = event::read()?
                 && k.kind == KeyEventKind::Press
             {

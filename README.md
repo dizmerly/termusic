@@ -1,6 +1,6 @@
 # termusic
 
-A text-only terminal YouTube Music player written in Rust with [Ratatui](https://ratatui.rs). Sign in with Google, search YouTube, browse your playlists and play audio, all from the keyboard.
+A terminal YouTube Music player written in Rust with [Ratatui](https://ratatui.rs). Sign in with Google, search YouTube, browse your playlists and play audio, all from the keyboard.
 
 ## Quickstart
 
@@ -40,7 +40,7 @@ The list pane has four tabs (`Tab`/`Shift-Tab` or `1`-`4`); each keeps its own s
 | Screen | What it does |
 |--------|--------------|
 | Search field | At the top of every tab (`/`). `Enter` runs the query (via `yt-dlp`, no account needed) and shows the top 30 results on the Results tab. `Esc` or `Tab` leaves the field and keeps the text; it never quits. |
-| Results (`1`) | Scrollable list of tracks (title and channel). Text only, no thumbnails. Follows the playing track. |
+| Results (`1`) | Scrollable list of tracks (title and channel). Text only; thumbnails never appear in lists. Follows the playing track. |
 | Queue (`2`) | The playing track, then what plays next. `Enter` jumps to the highlighted track; the ones before it count as played (`b` goes back through them). |
 | Lists (`3`, `P`) | Your YouTube playlists. `Enter` loads the playlist (first 50 tracks) as the queue, in order, and plays the first track; the Results tab then shows it. Signed out, the tab shows a sign-in prompt instead: `Enter` opens your browser and shows the URL while waiting. |
 | History (`4`, `H`) | The last 10 played tracks. `Enter` replays from there, resuming where you stopped, and the queue follows history order. |
@@ -92,6 +92,10 @@ The list pane has four tabs (`Tab`/`Shift-Tab` or `1`-`4`); each keeps its own s
 
 The volume is saved to `settings.json` in the config dir (same dir as `tokens.json`) and restored at startup (default 70). Set `TERMUSIC_CONFIG_DIR` to use another directory for settings and tokens.
 
+### Cover art
+
+The **Cover art** setting (Settings screen, off by default) shows the playing track's thumbnail as pixel art on the cassette label, drawn in the active shell's colors. The image-protocol query only runs in terminals known to support images (kitty, Ghostty, WezTerm, iTerm2, detected from `TERM_PROGRAM`, `TERM` or `KITTY_WINDOW_ID`), because the query library leaves a thread reading the keyboard if a terminal never answers. Those terminals get a crisp, hard-edged image (WezTerm through the iTerm2 protocol: the image crate blacklists its kitty and sixel paths). All other terminals get half-block pixels, and switching the setting on says so once per session. Set `TERMUSIC_ART=detect` to force the query anyway (for example in a sixel terminal the hints miss). Set `TERMUSIC_ART=halfblocks` to force half-blocks (for a terminal that misreports) or `TERMUSIC_ART=off` to never draw or fetch art; either skips the startup terminal query. Known limit: if the environment names an image terminal but the terminal never answers (for example `TERM=xterm-ghostty` carried over ssh to a path that drops the reply), startup waits about 1 s and the first keys you type are lost; set `TERMUSIC_ART=halfblocks` there.
+
 ### CLI
 ```sh
 termusic              # launch the TUI
@@ -99,6 +103,62 @@ termusic login        # sign in (opens your browser)
 termusic logout       # delete stored tokens
 termusic search <q>   # print the top results as text (no account needed)
 ```
+
+## Menu bar helper (macOS)
+
+A small menu bar item that shows what termusic is playing and controls it: play/pause, previous, next, volume, shuffle, loop, and the cover art, animations, tape hiss and shell settings. It is a remote, not a player. It never plays audio and never starts or quits termusic. When termusic is not running, its menu bar item is dimmed and its controls are greyed out. Quit TermusicBar quits only the helper.
+
+Build it (macOS 13 or later, with the Swift toolchain from the Xcode command line tools):
+
+```sh
+cd helper && swift build -c release
+```
+
+The binary is `helper/.build/release/TermusicBar`. Run it from the repository root:
+
+```sh
+helper/.build/release/TermusicBar
+```
+
+To start it at login, add that binary in System Settings > General > Login Items.
+
+### Control socket
+
+termusic listens on `termusic.sock` in its config dir: `$TERMUSIC_CONFIG_DIR` if set, else `~/Library/Application Support/termusic`. The socket is mode 0600, so only your user can connect. A lock file, `termusic.lock`, in the same directory records which termusic owns the socket. A second termusic runs without remote control, and its status line says so. A socket left behind by a crash is replaced on the next start.
+
+The protocol is one JSON object per line, UTF-8, ended by `\n`. Other programs can use it too. Send integers: `40`, not `40.5`.
+
+| Line | Effect |
+|---|---|
+| `{"cmd":"play_pause"}` | play or pause |
+| `{"cmd":"next"}` / `{"cmd":"prev"}` | next or previous track |
+| `{"cmd":"seek","secs":-5}` | seek by `secs`, clamped to -600..=600 |
+| `{"cmd":"toggle_shuffle"}` / `{"cmd":"cycle_loop"}` | toggle shuffle; cycle loop (off, this track, whole queue, off) |
+| `{"set":"volume","value":40}` | absolute volume, 0-100 |
+| `{"set":"loop","value":"off"}` | `"off"`, `"one"` (this track) or `"all"` (whole queue) |
+| `{"set":"shuffle","value":true}` | shuffle on or off |
+| `{"set":"shell","value":"amber"}` | a shell id from the `shells` list in the state line |
+| `{"set":"thumbnails","value":true}` | cover art on or off |
+| `{"set":"animations","value":true}` | animations on or off |
+| `{"set":"hiss","value":true}` | tape hiss on or off |
+| `{"set":"hiss_level","value":30}` | hiss level, 0-100 |
+| `{"get":"state"}` | replies with a state line |
+
+termusic sends a state line on connect, after every accepted request, and whenever its state changes (while playing, the position changes about once a second):
+
+```json
+{"state":{"title":"…","channel":"…","id":"…","loaded":true,"paused":false,"position":72.0,"duration":213.0,"volume":70,"loop":"one","shuffle":false,"shell":"tps-l2","shells":[{"id":"tps-l2","name":"TPS-L2"},{"id":"sunset","name":"SUNSET TAPE"},{"id":"amber","name":"AMBER HI-FI"}],"thumbnails":false,"animations":true,"hiss":false,"hiss_level":30}}
+```
+
+`title`, `channel`, `id` and `duration` are `null` when unknown or when nothing is loaded. `position` is whole seconds.
+
+A rejected request gets an error line and changes nothing:
+
+- `{"error":"offline"}`: a playback command while termusic is offline. Settings still work offline.
+- `{"error":"disabled"}`: a playback command whose command is disabled in `commands/`.
+- Any other message, such as `{"error":"unknown set key: foo"}` or `{"error":"value must be 0-100"}`.
+
+A line that is not JSON gets an error line, and the connection stays open. A line longer than 4096 bytes closes the connection. At most 4 clients can be connected at once; a fifth is closed.
 
 ## Development
 
@@ -109,7 +169,7 @@ cargo test
 cargo fmt
 ```
 
-Layout: `app.rs` (all state), `ui.rs` / `theme.rs` (rendering, colors), `auth.rs`, `youtube.rs`, `player.rs`, `queue.rs`, `net.rs`, `cmd.rs` (playback `Cmd`s that keys map to and player/connection `Event`s that `App::on_event` applies; media keys or a menu-bar helper can reuse them), `commands/` (one file per command with an `ENABLED` flag; the help screen lists only enabled ones). Sprint notes live in `SPRINT.md`.
+Layout: `app.rs` (all state), `ui.rs` / `theme.rs` (rendering, colors), `auth.rs`, `youtube.rs`, `player.rs`, `queue.rs`, `net.rs`, `cmd.rs` (playback `Cmd`s that keys map to and player/connection `Event`s that `App::on_event` applies; the control socket in `remote.rs` and the [menu bar helper](#menu-bar-helper-macos) drive the same ones), `commands/` (one file per command with an `ENABLED` flag; the help screen lists only enabled ones). Sprint notes live in `SPRINT.md`.
 
 ## Limitations
 - Unix only (macOS/Linux): the player uses a Unix socket.

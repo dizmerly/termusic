@@ -29,7 +29,7 @@ enum Tier {
 fn tier(w: u16, h: u16) -> Tier {
     if w >= 76 && h >= 22 {
         Tier::Deck
-    } else if w >= 38 && h >= 30 {
+    } else if w >= 38 && h >= 31 {
         Tier::Pocket
     } else {
         Tier::Compact
@@ -367,14 +367,158 @@ mod tests {
         a
     }
 
+    /// A playing app with cover art on and, if `cached`, the current track's cover in the cache.
+    fn with_cover(cached: bool) -> App {
+        let mut a = playing();
+        a.settings.thumbnails = true;
+        if cached {
+            let src = image::RgbImage::from_fn(40, 40, |x, y| {
+                image::Rgb([(x * 6) as u8, (y * 6) as u8, 128])
+            });
+            a.art.push((a.results[0].id.clone(), src));
+        }
+        a
+    }
+
+    /// Cells of the 10 x 5 art slot at 80x24 (the row of the label's first line, 11 columns
+    /// left of its text), row by row.
+    fn slot(a: &mut App) -> Vec<Vec<ratatui::buffer::Cell>> {
+        let b = buffer(a, 80, 24);
+        let r = rows(a, 80, 24);
+        let y0 = r.iter().position(|l| l.contains("A ──")).unwrap();
+        let x0 = r[y0]
+            .find("A ──")
+            .map(|i| r[y0][..i].chars().count())
+            .unwrap()
+            - ART_W
+            - 1;
+        (y0..y0 + 5)
+            .map(|y| {
+                (x0..x0 + ART_W)
+                    .map(|x| b[(x as u16, y as u16)].clone())
+                    .collect()
+            })
+            .collect()
+    }
+
+    const ART_W: usize = 10;
+
+    #[test]
+    fn cover_is_drawn_in_the_shells_inks() {
+        let mut a = with_cover(true);
+        let cells = slot(&mut a);
+        let palette = crate::art::shell_palette(a.shell());
+        for c in cells.iter().flatten() {
+            assert_eq!(c.symbol(), "▀");
+            assert!(palette.contains(&c.fg) && palette.contains(&c.bg));
+        }
+        // Not just the two paper tones: the gradient picks other inks too.
+        let colors: std::collections::HashSet<_> =
+            cells.iter().flatten().flat_map(|c| [c.fg, c.bg]).collect();
+        assert!(colors.len() > 2);
+    }
+
+    #[test]
+    fn placeholder_until_the_cover_is_cached() {
+        let mut a = with_cover(false);
+        let s = a.shell();
+        let paper = crate::art::shell_palette(s); // label and its darker paper
+        let cells = slot(&mut a);
+        let tones: std::collections::HashSet<_> =
+            cells.iter().flatten().flat_map(|c| [c.fg, c.bg]).collect();
+        assert_eq!(tones.len(), 2);
+        assert!(tones.contains(&s.label) && !paper.iter().all(|c| tones.contains(c)));
+        assert!(cells.iter().flatten().all(|c| c.symbol() == "▀"));
+    }
+
+    #[test]
+    fn cover_setting_off_draws_the_plain_label() {
+        let mut off = with_cover(true);
+        off.settings.thumbnails = false;
+        let mut plain = playing();
+        let r = rows(&mut off, 80, 24);
+        assert_eq!(r, rows(&mut plain, 80, 24));
+        assert!(r.iter().any(|l| l.contains("│ │ A ──")));
+        assert!(r.iter().all(|l| !l.contains("▀▀▀▀▀▀▀▀▀▀")));
+    }
+
+    #[test]
+    fn cover_hides_in_eject_and_insert_and_shows_when_seated() {
+        for (ms, shown) in [(80, false), (280, false), (500, true)] {
+            let mut a = with_cover(true);
+            let at = a.anim.now - std::time::Duration::from_millis(ms);
+            a.anim.swap = Some((at, "Take On Me".into(), "a-ha".into()));
+            let b = buffer(&mut a, 80, 24);
+            let r = rows(&mut a, 80, 24);
+            let y0 = r.iter().position(|l| l.contains("╭──────")).unwrap();
+            let blocks = (y0..y0 + 8)
+                .flat_map(|y| (4..14).map(move |x| (x, y)))
+                .filter(|&(x, y)| b[(x as u16, y as u16)].symbol() == "▀")
+                .count();
+            assert_eq!(blocks > 0, shown, "{ms} ms");
+        }
+    }
+
+    /// A cover-on app on the crisp path with a flat accent protocol cached (halfblocks picker).
+    fn with_crisp_cover() -> (App, ratatui::style::Color) {
+        use ratatui_image::picker::Picker;
+        let mut a = with_cover(true);
+        a.art_path = crate::art::ArtPath::Crisp;
+        a.picker = Some(Picker::halfblocks());
+        let accent = a.shell().accent;
+        let ratatui::style::Color::Rgb(r, g, b) = accent else {
+            panic!("accent must be rgb")
+        };
+        let src = image::RgbImage::from_pixel(40, 40, image::Rgb([r, g, b]));
+        let proto = crate::art::protocol(a.picker.as_ref().unwrap(), &src, a.shell());
+        a.cover_proto = Some((a.cover_key().unwrap(), proto));
+        (a, accent)
+    }
+
+    #[test]
+    fn crisp_image_hides_in_eject_and_insert_and_shows_when_seated() {
+        for (ms, shown) in [(80, false), (280, false), (500, true)] {
+            let (mut a, accent) = with_crisp_cover();
+            let at = a.anim.now - std::time::Duration::from_millis(ms);
+            a.anim.swap = Some((at, "Take On Me".into(), "a-ha".into()));
+            // The image cells carry no "A ──" text, so find the slot on the placeholder layout.
+            let r = rows(&mut with_cover(false), 80, 24);
+            let y0 = r.iter().position(|l| l.contains("A ──")).unwrap();
+            let x0 = r[y0]
+                .find("A ──")
+                .map(|i| r[y0][..i].chars().count())
+                .unwrap()
+                - ART_W
+                - 1;
+            let b = buffer(&mut a, 80, 24);
+            let hit = (y0..y0 + 5)
+                .flat_map(|y| (x0..x0 + ART_W).map(move |x| (x as u16, y as u16)))
+                .filter(|&p| b[p].bg == accent)
+                .count();
+            assert_eq!(hit == 50, shown, "{ms} ms");
+            assert!(shown || hit == 0, "{ms} ms: plain paper while swapping");
+        }
+    }
+
+    #[test]
+    fn changing_shell_recolors_the_cover() {
+        let mut a = with_cover(true);
+        let look =
+            |a: &mut App| -> Vec<_> { slot(a).iter().flatten().map(|c| (c.fg, c.bg)).collect() };
+        let first = look(&mut a);
+        a.settings.shell = SHELLS[1].id.into();
+        assert_ne!(first, look(&mut a));
+    }
+
     #[test]
     fn tiers_by_size() {
         assert_eq!(tier(80, 24), Tier::Deck);
         assert_eq!(tier(76, 22), Tier::Deck);
         assert_eq!(tier(75, 40), Tier::Pocket);
         assert_eq!(tier(76, 21), Tier::Compact);
-        assert_eq!(tier(38, 30), Tier::Pocket);
-        assert_eq!(tier(37, 30), Tier::Compact);
+        assert_eq!(tier(38, 31), Tier::Pocket);
+        assert_eq!(tier(38, 30), Tier::Compact);
+        assert_eq!(tier(37, 31), Tier::Compact);
         assert_eq!(tier(60, 29), Tier::Compact);
         assert_eq!(tier(0, 0), Tier::Compact);
     }
@@ -402,14 +546,19 @@ mod tests {
         );
         assert!(r.iter().any(|l| l.contains("Never Gonna Give")));
         assert!(r.iter().any(|l| l.contains("072  ━") && l.contains("1:12")));
-        assert!(
-            r.iter()
-                .any(|l| l.contains("│◀◀ ││ ▶ ││▮▮ ││▶▶ ││ ⤮ ││↻1 │"))
-        );
-        assert!(
-            r.iter()
-                .any(|l| l.contains("└─b─┘└─p─┘└─p─┘└─n─┘└─s─┘└─l─┘"))
-        );
+        // Play, shuffle and loop are latched down; the rest stand on their shadows.
+        let keys = r.iter().position(|l| l.contains("│ ◀◀ │")).unwrap() - 1;
+        for (i, want) in [
+            "┌────┐     ┌────┐┌────┐           ",
+            "│ ◀◀ │┌───┐│ ▮▮ ││ ▶▶ │ ┌───┐┌───┐",
+            "└─b──┘│ ▶ │└─p──┘└─n──┘ │ ⤮ ││↻1 │",
+            " ▀▀▀▀ └─p─┘ ▀▀▀▀  ▀▀▀▀  └─s─┘└─l─┘",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(r[keys + i].contains(want), "{}", r[keys + i]);
+        }
         assert!(r[22].contains("queued: Take On Me")); // status pinned to the pane bottom
         assert_eq!(
             r[1],
@@ -426,6 +575,30 @@ mod tests {
     }
 
     #[test]
+    fn animations_off_draws_the_milestone_1_reels() {
+        let hubs = |a: &mut App| {
+            let r = rows(a, 80, 24);
+            let l = r
+                .iter()
+                .find(|l| l.contains(")▓") || l.contains(") "))
+                .unwrap();
+            l.chars()
+                .filter(|c| theme::REEL_FRAMES.contains(c))
+                .collect::<String>()
+        };
+        let mut a = playing(); // 72 s in
+        a.anim.reel = 5;
+        a.settings.animations = false;
+        assert_eq!(hubs(&mut a), "◐◓"); // frame = whole seconds, as before
+        a.player.position = 73.0;
+        assert_eq!(hubs(&mut a), "◓◑");
+        a.player.playing = false;
+        assert_eq!(hubs(&mut a), "◐◓"); // paused: back to frame 0
+        a.settings.animations = true;
+        assert_eq!(hubs(&mut a), "◓◑"); // the animation clock's frame, held while paused
+    }
+
+    #[test]
     fn idle_deck_shows_no_tape_and_empty_results_hint() {
         let mut a = blank();
         let s = render(&mut a, 80, 24);
@@ -438,7 +611,13 @@ mod tests {
 
     #[test]
     fn nothing_panics_at_any_size() {
-        let mut apps = [blank(), playing()];
+        let mut apps = [
+            blank(),
+            playing(),
+            with_cover(true),
+            with_cover(false),
+            with_crisp_cover().0,
+        ];
         apps[1].screen = Screen::Queue;
         for a in &mut apps {
             for (w, h) in [
@@ -452,6 +631,7 @@ mod tests {
                 (30, 6),
                 (37, 30),
                 (38, 30),
+                (38, 31),
                 (40, 1),
                 (60, 16),
                 (75, 21),
@@ -552,13 +732,13 @@ mod tests {
             .unwrap();
         let strip = r.iter().position(|l| l.contains("1 RESULTS")).unwrap();
         assert!(top < strip && 34 - strip >= 11, "J-card keeps 10+ rows");
-        assert!(r.iter().any(|l| l.contains("└─b─┘")));
-        let r = rows(&mut a, 38, 30); // narrowest pocket: the volume bar goes, the rest fits
+        assert!(r.iter().any(|l| l.contains("└─b──┘")));
+        let r = rows(&mut a, 38, 31); // narrowest pocket: the volume bar goes, the rest fits
         assert!(r[0].contains("⤮ ↻1 ── VOL 70% ─╮") && r[0].starts_with("╭─ TERMUSIC"));
         let strip = r.iter().position(|l| l.contains("1 RESULTS")).unwrap();
-        assert_eq!(29 - strip, 10, "J-card rows above the bottom border");
+        assert_eq!(30 - strip, 10, "J-card rows above the bottom border");
         assert!(r[strip - 1].contains("queued: Take On Me"));
-        assert!(r.iter().any(|l| l.contains("└─b─┘")));
+        assert!(r.iter().any(|l| l.contains("└─b──┘")));
         a.status.clear();
         let r = rows(&mut a, 60, 16);
         assert!(!r[0].contains("TERMUSIC") && r[0].contains("1 RESULTS"));
@@ -743,7 +923,7 @@ mod tests {
         assert!(top.contains("⤮ ↻1") && top.contains("VOL ▮▮▮▮▮▮▮▮▮▮ 100% ─╮"));
         a.queue.looping = Loop::All;
         assert!(rows(&mut a, 80, 24)[0].contains("⤮ ↻ ──"));
-        let top = rows(&mut a, 38, 30)[0].clone();
+        let top = rows(&mut a, 38, 31)[0].clone();
         assert!(
             top.starts_with("╭─ TERMUSIC") && top.ends_with("100% ─╮"),
             "{top}"
@@ -898,6 +1078,42 @@ mod tests {
             let mut a = playing();
             a.searching = true;
             show("Deck, search focused", &mut a, w, h);
+        }
+        for (name, cached) in [("cover shown", true), ("cover placeholder", false)] {
+            let mut a = with_cover(cached);
+            a.status.clear();
+            show(&format!("Deck, {name}"), &mut a, 80, 24);
+        }
+        let mut a = playing();
+        a.status.clear();
+        let t = a.anim.now;
+        a.anim.advance(t, true, 72, Some((-4.0, -9.0))); // a loud moment: the peaks
+        a.anim.advance(
+            t + std::time::Duration::from_millis(300),
+            true,
+            72,
+            Some((-15.0, -18.0)),
+        );
+        show(
+            "Deck, playing, meters L -15 dB R -18 dB, peaks held",
+            &mut a,
+            80,
+            24,
+        );
+        let mut a = playing();
+        a.status.clear();
+        a.anim.pressed = Some((crate::anim::Key::Next, a.anim.now));
+        show("Deck, n held down (momentary press)", &mut a, 80, 24);
+        for (ms, name) in [
+            (80, "eject, 2 rows up"),
+            (280, "insert, 2 rows in"),
+            (500, "seat, whirring"),
+        ] {
+            let mut a = playing();
+            a.status.clear();
+            let at = a.anim.now - std::time::Duration::from_millis(ms);
+            a.anim.swap = Some((at, "Take On Me".into(), "a-ha".into()));
+            show(&format!("Deck, tape swap {name}"), &mut a, 80, 24);
         }
         show("Pocket, playing", &mut playing(), 60, 34);
         show("Compact, playing", &mut playing(), 60, 16);
