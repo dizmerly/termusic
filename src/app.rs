@@ -5,6 +5,7 @@ use crate::commands;
 use crate::history::{self, Entry};
 use crate::player::Player;
 use crate::queue::{Loop, Queue};
+use crate::remote::{self, Request, ShellInfo, State};
 use crate::settings::Settings;
 use crate::theme::{self, Shell};
 use crate::youtube::{self, Track};
@@ -17,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::{oneshot, watch};
 
 /// Results of background network tasks, applied to `App` by `tick`.
 pub enum Msg {
@@ -35,6 +37,8 @@ pub enum Msg {
     SaveFailed(String),
     /// Cover art fetched for the video id (`None`: failed, nothing to show).
     Art(String, Option<art::Source>),
+    /// A control-socket request; the reply carries the state after applying it.
+    Remote(Request, oneshot::Sender<State>),
 }
 
 /// Covers kept in memory.
@@ -139,6 +143,10 @@ pub struct App {
     pub busy: bool,
     tx: UnboundedSender<Msg>,
     rx: UnboundedReceiver<Msg>,
+    /// Latest state for control-socket clients.
+    state_tx: watch::Sender<State>,
+    /// The control socket this process bound, removed on exit.
+    pub(crate) sock: Option<PathBuf>,
     /// The search field has focus (typing goes there); the tab stays what it was.
     pub searching: bool,
     /// Selection in the active tab's list.
@@ -197,7 +205,22 @@ impl App {
             std::env::var_os("TERMUSIC_HISTORY"),
             crate::settings::config_dir(),
         );
-        Self::with_paths(settings, path)
+        let mut a = Self::with_paths(settings, path);
+        a.serve_remote(remote::socket_path().unwrap_or_default());
+        a
+    }
+
+    /// Bind the control socket at `path` and serve it; on failure say why in the status line.
+    pub(crate) fn serve_remote(&mut self, path: PathBuf) {
+        match remote::bind(&path) {
+            Ok(l) => {
+                self.sock = Some(path);
+                self.state_tx.send_replace(self.snapshot());
+                remote::serve(l, self.tx.clone(), self.state_tx.subscribe());
+            }
+            Err(e) if self.status.is_empty() => self.status = e,
+            Err(e) => self.status = format!("{}; {e}", self.status),
+        }
     }
 
     /// Tests use this with no path so they never touch the real config.
@@ -216,6 +239,7 @@ impl App {
             Screen::Offline
         };
         let (tx, rx) = unbounded_channel();
+        let (state_tx, _) = watch::channel(State::default());
         let mut player = Player::new(settings.volume);
         player.meters = settings.animations;
         player.hiss_on = settings.hiss;
@@ -252,6 +276,8 @@ impl App {
             busy: false,
             tx,
             rx,
+            state_tx,
+            sock: None,
             screen,
             stack: Vec::new(),
             input: String::new(),
@@ -277,8 +303,42 @@ impl App {
     fn cycle_shell(&mut self, step: isize) {
         let n = theme::SHELLS.len() as isize;
         let i = (theme::shell_index(&self.settings.shell) as isize + step).rem_euclid(n);
-        self.settings.shell = theme::SHELLS[i as usize].id.into();
+        self.set_shell(theme::SHELLS[i as usize].id);
+    }
+
+    /// Pick a shell by id and save it; false (nothing changed) for an unknown id.
+    pub fn set_shell(&mut self, id: &str) -> bool {
+        let Some(sh) = theme::SHELLS.iter().find(|s| s.id == id) else {
+            return false;
+        };
+        self.settings.shell = sh.id.into();
         self.save_settings();
+        true
+    }
+
+    /// Absolute volume, 0..=100 (clamped), through the same path as `Cmd::Volume`.
+    pub fn set_volume(&mut self, v: u8) {
+        let d = i32::from(v.min(100)) - i32::from(self.player.volume);
+        self.dispatch(Cmd::Volume(d));
+    }
+
+    pub fn set_shuffle(&mut self, on: bool) {
+        if self.queue.shuffle != on {
+            self.queue.toggle_shuffle();
+        }
+    }
+
+    pub fn set_loop(&mut self, l: Loop) {
+        self.queue.looping = l;
+        self.status = match l {
+            Loop::One => "loop: this track",
+            Loop::All => "loop: whole queue",
+            Loop::Off => "loop: off",
+        }
+        .into();
+        if let Err(e) = self.player.set_loop_file(l == Loop::One) {
+            self.status = e.to_string();
+        }
     }
 
     /// Turn animations on or off (Settings today, the control socket later) and save the choice.
@@ -460,7 +520,10 @@ impl App {
     /// Apply finished background work and detect the end of the current track. Called every frame.
     pub fn tick(&mut self) {
         while let Ok(m) = self.rx.try_recv() {
-            if !matches!(m, Msg::LoginUrl(_) | Msg::SaveFailed(_) | Msg::Art(..)) {
+            if !matches!(
+                m,
+                Msg::LoginUrl(_) | Msg::SaveFailed(_) | Msg::Art(..) | Msg::Remote(..)
+            ) {
                 self.busy = false;
             }
             // Replies never move focus: whoever is typing keeps typing.
@@ -475,6 +538,10 @@ impl App {
                     self.login_url = None;
                 }
                 Msg::LoginUrl(u) => self.login_url = Some(u),
+                Msg::Remote(req, reply) => {
+                    self.apply(req);
+                    let _ = reply.send(self.snapshot()); // clients get the watch change too, deduped there
+                }
                 Msg::SaveFailed(e) => self.status = e,
                 Msg::Art(id, Some(src)) => {
                     self.art.retain(|(i, _)| *i != id);
@@ -552,6 +619,77 @@ impl App {
             .filter(|_| p.playing)
             .map(|(l, r)| (by_volume(l, p.volume), by_volume(r, p.volume)));
         self.anim.advance(Instant::now(), p.playing, count, levels);
+        self.publish();
+    }
+
+    /// Do what a control-socket client asked, through the same methods the keys use.
+    fn apply(&mut self, r: Request) {
+        match r {
+            Request::Cmd(c) => self.dispatch(c),
+            Request::Volume(v) => self.set_volume(v),
+            Request::Loop(l) => self.set_loop(l),
+            Request::Shuffle(on) => self.set_shuffle(on),
+            Request::Shell(id) => {
+                self.set_shell(&id);
+            }
+            Request::Thumbnails(on) => self.set_thumbnails(on),
+            Request::Animations(on) => self.set_animations(on),
+            Request::Hiss(on) => self.set_hiss(on),
+            Request::HissLevel(l) => self.set_hiss_level(l),
+            Request::GetState => {}
+        }
+    }
+
+    /// What control-socket clients see now (no IO); position is whole seconds.
+    pub fn snapshot(&self) -> State {
+        let p = &self.player;
+        let loaded = p.now_playing.is_some();
+        let cur = self.queue.current().filter(|_| loaded);
+        State {
+            title: cur.map(|t| t.title.clone()),
+            channel: cur.map(|t| t.channel.clone()),
+            id: cur.map(|t| t.id.clone()),
+            loaded,
+            paused: loaded && !p.playing,
+            position: if loaded {
+                p.position.max(0.0).floor()
+            } else {
+                0.0
+            },
+            duration: p.duration.filter(|_| loaded),
+            volume: p.volume,
+            looping: match self.queue.looping {
+                Loop::Off => "off",
+                Loop::One => "one",
+                Loop::All => "all",
+            },
+            shuffle: self.queue.shuffle,
+            shell: self.shell().id,
+            shells: theme::SHELLS
+                .iter()
+                .map(|s| ShellInfo {
+                    id: s.id,
+                    name: s.name,
+                })
+                .collect(),
+            thumbnails: self.settings.thumbnails,
+            animations: self.settings.animations,
+            hiss: self.settings.hiss,
+            hiss_level: self.settings.hiss_level,
+        }
+    }
+
+    /// Send the snapshot to socket clients if it changed; returns it.
+    fn publish(&self) -> State {
+        let s = self.snapshot();
+        self.state_tx.send_if_modified(|c| {
+            let changed = *c != s;
+            if changed {
+                *c = s.clone();
+            }
+            changed
+        });
+        s
     }
 
     /// Keep the background preload matching the queue: drop a stale one, start one near the end.
@@ -661,14 +799,8 @@ impl App {
                 Ok(())
             }
             Cmd::CycleLoop => {
-                self.queue.looping = self.queue.looping.cycle();
-                self.status = match self.queue.looping {
-                    Loop::One => "loop: this track",
-                    Loop::All => "loop: whole queue",
-                    Loop::Off => "loop: off",
-                }
-                .into();
-                self.player.set_loop_file(self.queue.looping == Loop::One)
+                self.set_loop(self.queue.looping.cycle());
+                Ok(())
             }
         }
     }
@@ -816,6 +948,9 @@ impl App {
         self.record_position();
         self.settings.volume = self.player.volume;
         self.settings.save();
+        if let Some(p) = self.sock.take() {
+            let _ = std::fs::remove_file(p);
+        }
         if let Some(p) = &self.history_path {
             let _ = history::save(p, &self.history);
         }

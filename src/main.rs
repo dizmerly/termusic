@@ -9,6 +9,7 @@ mod history;
 mod net;
 mod player;
 mod queue;
+mod remote;
 mod settings;
 mod theme;
 mod ui;
