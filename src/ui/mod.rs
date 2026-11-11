@@ -549,10 +549,10 @@ mod tests {
         // Play, shuffle and loop are latched down; the rest stand on their shadows.
         let keys = r.iter().position(|l| l.contains("│ ◀◀ │")).unwrap() - 1;
         for (i, want) in [
-            "┌────┐     ┌────┐┌────┐          ",
-            "│ ◀◀ │┌───┐│ ▮▮ ││ ▶▶ │┌───┐┌───┐",
-            "└─b──┘│ ▶ │└─p──┘└─n──┘│ ⤮ ││↻1 │",
-            " ▀▀▀▀ └─p─┘ ▀▀▀▀  ▀▀▀▀ └─s─┘└─l─┘",
+            "┌────┐     ┌────┐┌────┐           ",
+            "│ ◀◀ │┌───┐│ ▮▮ ││ ▶▶ │ ┌───┐┌───┐",
+            "└─b──┘│ ▶ │└─p──┘└─n──┘ │ ⤮ ││↻1 │",
+            " ▀▀▀▀ └─p─┘ ▀▀▀▀  ▀▀▀▀  └─s─┘└─l─┘",
         ]
         .iter()
         .enumerate()

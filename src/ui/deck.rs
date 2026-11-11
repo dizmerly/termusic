@@ -358,6 +358,10 @@ pub fn key_caps(
             let shadow = format!(" {} ", "▀".repeat(inner));
             rows[3].push(Span::styled(shadow, fg(s.dim)));
         }
+        if k == Key::Next {
+            // One column sets the mode keys apart from the transport bank (34 = cassette width).
+            rows.iter_mut().for_each(|r| r.push(Span::raw(" ")));
+        }
     }
     rows.into_iter().map(Line::from).collect()
 }
@@ -739,7 +743,7 @@ mod tests {
                     .iter()
                     .flat_map(|sp| sp.content.chars().map(move |c| (c, sp.style)))
                     .collect();
-                let at = CAP_W[..cap].iter().sum::<usize>();
+                let at = CAP_W[..cap].iter().sum::<usize>() + usize::from(cap > 3); // gap after next
                 let c = &cells[at..at + CAP_W[cap]];
                 (c.iter().map(|x| x.0).collect(), c[2].1.fg)
             })
@@ -772,7 +776,7 @@ mod tests {
             for pressed in [None, Some(Key::Next), Some(Key::Loop)] {
                 let l = key_caps(s, true, true, true, looping, pressed);
                 assert_eq!(l.len(), 4);
-                assert!(l.iter().all(|r| r.width() == 33 && r.width() <= CASSETTE_W));
+                assert!(l.iter().all(|r| r.width() == CASSETTE_W));
                 assert_eq!(
                     down(&l, 5),
                     looping != Loop::Off || pressed == Some(Key::Loop)
@@ -787,10 +791,10 @@ mod tests {
         assert_eq!(
             rows,
             [
-                "┌────┐┌───┐┌────┐┌────┐┌───┐     ",
-                "│ ◀◀ ││ ▶ ││ ▮▮ ││ ▶▶ ││ ⤮ │┌───┐",
-                "└─b──┘└─p─┘└─p──┘└─n──┘└─s─┘│↻1 │",
-                " ▀▀▀▀  ▀▀▀  ▀▀▀▀  ▀▀▀▀  ▀▀▀ └─l─┘",
+                "┌────┐┌───┐┌────┐┌────┐ ┌───┐     ",
+                "│ ◀◀ ││ ▶ ││ ▮▮ ││ ▶▶ │ │ ⤮ │┌───┐",
+                "└─b──┘└─p─┘└─p──┘└─n──┘ └─s─┘│↻1 │",
+                " ▀▀▀▀  ▀▀▀  ▀▀▀▀  ▀▀▀▀   ▀▀▀ └─l─┘",
             ]
         );
         let all = |l: &[Line]| (0..6).map(|c| down(l, c)).collect::<Vec<_>>();
