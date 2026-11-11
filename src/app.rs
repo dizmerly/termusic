@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 
 /// Results of background network tasks, applied to `App` by `tick`.
 pub enum Msg {
@@ -38,11 +38,13 @@ pub enum Msg {
     /// Cover art fetched for the video id (`None`: failed, nothing to show).
     Art(String, Option<art::Source>),
     /// A control-socket request; the reply carries the state after applying it.
-    Remote(Request, oneshot::Sender<State>),
+    Remote(Result<Request, String>, remote::Reply),
 }
 
 /// Covers kept in memory.
 const ART_CACHE: usize = 8;
+/// Control-socket requests handled per `tick`.
+const REMOTE_PER_TICK: usize = 32;
 
 /// Serializes background writes so they land in the order they were requested.
 static IO: Mutex<()> = Mutex::new(());
@@ -145,8 +147,10 @@ pub struct App {
     rx: UnboundedReceiver<Msg>,
     /// Latest state for control-socket clients.
     state_tx: watch::Sender<State>,
-    /// The control socket this process bound, removed on exit.
-    pub(crate) sock: Option<PathBuf>,
+    /// The control socket this process bound and its (dev, ino), removed on exit if still ours.
+    pub(crate) sock: Option<(PathBuf, (u64, u64))>,
+    /// Held for the life of the process: it says we own the control socket.
+    lock: Option<std::fs::File>,
     /// The search field has focus (typing goes there); the tab stays what it was.
     pub searching: bool,
     /// Selection in the active tab's list.
@@ -206,20 +210,26 @@ impl App {
             crate::settings::config_dir(),
         );
         let mut a = Self::with_paths(settings, path);
-        a.serve_remote(remote::socket_path().unwrap_or_default());
+        a.serve_remote(remote::socket_path());
         a
     }
 
     /// Bind the control socket at `path` and serve it; on failure say why in the status line.
-    pub(crate) fn serve_remote(&mut self, path: PathBuf) {
-        match remote::bind(&path) {
-            Ok(l) => {
-                self.sock = Some(path);
+    pub(crate) fn serve_remote(&mut self, path: Option<PathBuf>) {
+        let bound = match &path {
+            Some(p) => remote::bind(p),
+            None => Err("remote control: no config directory".into()),
+        };
+        match (bound, path) {
+            (Ok(b), Some(path)) => {
+                self.sock = Some((path, b.id));
+                self.lock = Some(b.lock);
                 self.state_tx.send_replace(self.snapshot());
-                remote::serve(l, self.tx.clone(), self.state_tx.subscribe());
+                remote::serve(b.listener, self.tx.clone(), self.state_tx.subscribe());
             }
-            Err(e) if self.status.is_empty() => self.status = e,
-            Err(e) => self.status = format!("{}; {e}", self.status),
+            (Err(e), _) if self.status.is_empty() => self.status = e,
+            (Err(e), _) => self.status = format!("{}; {e}", self.status),
+            (Ok(_), None) => {}
         }
     }
 
@@ -278,6 +288,7 @@ impl App {
             rx,
             state_tx,
             sock: None,
+            lock: None,
             screen,
             stack: Vec::new(),
             input: String::new(),
@@ -519,6 +530,7 @@ impl App {
 
     /// Apply finished background work and detect the end of the current track. Called every frame.
     pub fn tick(&mut self) {
+        let mut remote = 0;
         while let Ok(m) = self.rx.try_recv() {
             if !matches!(
                 m,
@@ -539,8 +551,9 @@ impl App {
                 }
                 Msg::LoginUrl(u) => self.login_url = Some(u),
                 Msg::Remote(req, reply) => {
-                    self.apply(req);
-                    let _ = reply.send(self.snapshot()); // clients get the watch change too, deduped there
+                    remote += 1;
+                    // Publish first: the reply must carry the state this request produced.
+                    reply.send(req.and_then(|r| self.apply(r)).map(|()| self.publish()));
                 }
                 Msg::SaveFailed(e) => self.status = e,
                 Msg::Art(id, Some(src)) => {
@@ -597,6 +610,9 @@ impl App {
                 }
             }
             self.searching = typing && !focus_list;
+            if remote >= REMOTE_PER_TICK {
+                break; // a flooding client must not stall the frame; the rest waits for the next tick
+            }
         }
         self.sync_preload();
         self.sync_cover();
@@ -623,12 +639,27 @@ impl App {
     }
 
     /// Do what a control-socket client asked, through the same methods the keys use.
-    fn apply(&mut self, r: Request) {
+    fn apply(&mut self, r: Request) -> Result<(), String> {
         match r {
-            Request::Cmd(c) => self.dispatch(c),
+            Request::Cmd(c) => {
+                self.cmd_gate(c, commands::disabled)?;
+                self.dispatch(c);
+            }
             Request::Volume(v) => self.set_volume(v),
-            Request::Loop(l) => self.set_loop(l),
-            Request::Shuffle(on) => self.set_shuffle(on),
+            Request::Loop(l) => {
+                let changed = self.queue.looping != l;
+                self.set_loop(l);
+                if changed {
+                    self.press(Key::Loop);
+                }
+            }
+            Request::Shuffle(on) => {
+                let changed = self.queue.shuffle != on;
+                self.set_shuffle(on);
+                if changed {
+                    self.press(Key::Shuffle);
+                }
+            }
             Request::Shell(id) => {
                 self.set_shell(&id);
             }
@@ -637,6 +668,36 @@ impl App {
             Request::Hiss(on) => self.set_hiss(on),
             Request::HissLevel(l) => self.set_hiss_level(l),
             Request::GetState => {}
+        }
+        Ok(())
+    }
+
+    /// The keyboard's gates for a playback command: not offline, not disabled.
+    pub(crate) fn cmd_gate(&self, c: Cmd, disabled: impl Fn(char) -> bool) -> Result<(), String> {
+        if self.screen == Screen::Offline {
+            return Err("offline".into());
+        }
+        let key = match c {
+            Cmd::PlayPause => commands::pause::KEY,
+            Cmd::Next => commands::skip::KEY,
+            Cmd::Prev => commands::prev::KEY,
+            Cmd::Seek(s) if s < 0 => commands::seek_back::KEY,
+            Cmd::Seek(_) => commands::seek_forward::KEY,
+            Cmd::Volume(d) if d < 0 => commands::volume_down::KEY,
+            Cmd::Volume(_) => commands::volume_up::KEY,
+            Cmd::ToggleShuffle => commands::shuffle::KEY,
+            Cmd::CycleLoop => commands::loop_track::KEY,
+        };
+        if disabled(key) {
+            return Err("disabled".into());
+        }
+        Ok(())
+    }
+
+    /// Show a transport cap pressed, if animations are on.
+    fn press(&mut self, k: Key) {
+        if self.settings.animations {
+            self.anim.pressed = Some((k, Instant::now()));
         }
     }
 
@@ -651,7 +712,7 @@ impl App {
             id: cur.map(|t| t.id.clone()),
             loaded,
             paused: loaded && !p.playing,
-            position: if loaded {
+            position: if loaded && p.position.is_finite() {
                 p.position.max(0.0).floor()
             } else {
                 0.0
@@ -767,8 +828,8 @@ impl App {
             Cmd::CycleLoop => Some(Key::Loop),
             Cmd::Seek(_) | Cmd::Volume(_) => None,
         };
-        if let Some(k) = key.filter(|_| self.settings.animations) {
-            self.anim.pressed = Some((k, Instant::now()));
+        if let Some(k) = key {
+            self.press(k);
         }
     }
 
@@ -948,9 +1009,12 @@ impl App {
         self.record_position();
         self.settings.volume = self.player.volume;
         self.settings.save();
-        if let Some(p) = self.sock.take() {
-            let _ = std::fs::remove_file(p);
+        if let Some((p, id)) = self.sock.take()
+            && remote::file_id(&p) == Some(id)
+        {
+            let _ = std::fs::remove_file(p); // only our own socket, not one a later bind put there
         }
+        self.lock = None;
         if let Some(p) = &self.history_path {
             let _ = history::save(p, &self.history);
         }
