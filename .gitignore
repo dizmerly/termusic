@@ -1,4 +1,7 @@
 /target
 .DS_Store
 client_secret*.json
-/scripts
+.codex
+.gemini
+.impeccable
+/docs/overhaul-specs

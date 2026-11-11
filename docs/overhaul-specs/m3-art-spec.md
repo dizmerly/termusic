@@ -1,8 +1,9 @@
 # Milestone 3 design spec: pixel-art cover on the cassette label
 
-Designer: Fable (main session). Implementer: Opus. Builds on milestones 1 and 2 (merged into
+Designer and Advisor: Opus (main session). Implementer: Sonnet. Builds on milestones 1 and 2 (merged into
 `main`). Overall plan: /Users/dizmerly/.claude/plans/cached-toasting-peach.md. Where this spec
-and the plan differ, this spec wins. Where it is silent, do the simplest thing and report it.
+and the plan differ, this spec wins. Where it is silent, do the simplest thing and report it. 
+Alternate Designer: Fable (only use for particularly challenging artistic decisions). 
 
 Checked by the designer: `ratatui-image` 11.1.0 (latest stable; 12.x is release-candidate only)
 declares `ratatui ^0.30.1` and `image ^0.25.6`. Not yet checked: that it builds here, and its

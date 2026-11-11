@@ -1,8 +1,13 @@
 # Milestone 4 design spec: control socket and macOS menu bar helper
 
-Designer: Fable (main session). Implementer: Opus. Builds on milestones 1-3 (merged into
+Designer and Advisor: Opus (main session). Implementer: Sonnet. Builds on milestones 1 and 2 (merged into
 `main`). Overall plan: /Users/dizmerly/.claude/plans/cached-toasting-peach.md. Where this spec
-and the plan differ, this spec wins. Where it is silent, do the simplest thing and report it.
+and the plan differ, this spec wins. Where it is silent, do the simplest thing and report it. 
+Alternate Designer: Fable (only use for particularly challenging artistic decisions). 
+Also make sure to document your work, in this same overhaul specs folder, with the respective completed overhaul specs,
+the main goal is to audit the technologies, test coverage, and design of the project to the author, so that 
+the author can review it. 
+
 
 Goal: a small menu bar item on macOS that shows what termusic is playing and lets the user
 control playback and the app's settings without switching to the terminal. The helper is a
