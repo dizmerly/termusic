@@ -1,5 +1,6 @@
 mod anim;
 mod app;
+mod art;
 mod auth;
 mod cmd;
 mod commands;
