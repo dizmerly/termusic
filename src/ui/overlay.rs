@@ -40,7 +40,7 @@ const GROUPS: [(&str, &[&str]); 4] = [
 ];
 
 /// Navigation and screen keys that are not commands.
-const NAV_KEYS: [(&str, &str); 12] = [
+const NAV_KEYS: [(&str, &str); 13] = [
     ("j/k ↓/↑", "move down / up in a list (scroll in Help)"),
     ("PgDn/Up", "move one page in a list"),
     ("g / G", "jump to the first / last row"),
@@ -55,6 +55,10 @@ const NAV_KEYS: [(&str, &str); 12] = [
     ("Tab", "next tab; in the search field: back to the list"),
     ("Shift-Tab", "previous tab"),
     ("1-4", "Results, Queue, Lists, History tab"),
+    (
+        "Ctrl-W",
+        "in the search field: delete a word (also Alt/Ctrl-Backspace)",
+    ),
     ("F1", "help (same as ?)"),
     ("F2", "Lists tab (same as P), also while typing a search"),
     ("F3", "settings (same as S), also while typing a search"),

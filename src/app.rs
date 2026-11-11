@@ -545,8 +545,15 @@ impl App {
 
     /// Typing in the search field: every letter is text, so only Enter, Esc/Tab and F-keys act.
     fn handle_search_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             KeyCode::Enter if !self.input.trim().is_empty() && !self.busy => self.run_search(),
+            KeyCode::Backspace if ctrl || alt => self.delete_word(),
+            KeyCode::Char('w') if ctrl => self.delete_word(),
+            KeyCode::Char('h') if ctrl => {
+                self.input.pop();
+            }
             KeyCode::Char(c) => self.input.push(c),
             KeyCode::Backspace => {
                 self.input.pop();
@@ -558,6 +565,13 @@ impl App {
             KeyCode::F(4) => self.goto_tab(3, tabs_off()),
             _ => {}
         }
+    }
+
+    /// Drop trailing spaces, then the word before them.
+    fn delete_word(&mut self) {
+        let t = self.input.trim_end();
+        let keep = t.rfind(' ').map_or(0, |i| i + 1);
+        self.input.truncate(keep);
     }
 
     /// Focus the search field over the current tab (overlays close).

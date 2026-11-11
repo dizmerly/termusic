@@ -14,7 +14,11 @@ mod youtube;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
+use crossterm::execute;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -59,6 +63,14 @@ async fn main() -> Result<()> {
 
 fn run_tui() -> Result<()> {
     let mut terminal = ratatui::init();
+    // Lets terminals with the kitty protocol report Ctrl-Backspace distinctly.
+    let enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    if enhanced {
+        let _ = execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
     let mut app = app::App::new();
     let res = (|| -> Result<()> {
         while !app.quit {
@@ -73,6 +85,9 @@ fn run_tui() -> Result<()> {
         }
         Ok(())
     })();
+    if enhanced {
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
     ratatui::restore();
     app.shutdown();
     res
