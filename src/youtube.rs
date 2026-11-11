@@ -14,16 +14,49 @@ pub struct Track {
 }
 
 async fn get(path: &str, params: &[(&str, &str)]) -> Result<Vec<Track>> {
-    let v: Value = reqwest::Client::new()
+    let r = reqwest::Client::new()
         .get(format!("{API}{path}"))
         .bearer_auth(auth::access_token().await?)
         .query(params)
         .send()
-        .await?
-        .error_for_status()?
-        .json()
         .await?;
+    let status = r.status();
+    // Google explains failures in a JSON body; a non-JSON body just falls to the generic message.
+    let v: Value = r.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        bail!(api_error(status.as_u16(), &v));
+    }
     Ok(parse(&v))
+}
+
+/// Short, actionable text for a YouTube Data API failure. Matches Google's `reason` first, then the HTTP status.
+fn api_error(status: u16, body: &Value) -> String {
+    let e = &body["error"];
+    let reason = e["errors"][0]["reason"]
+        .as_str()
+        .or(e["details"][0]["reason"].as_str())
+        .unwrap_or("");
+    match (reason, status) {
+        ("accessNotConfigured" | "SERVICE_DISABLED", _) => {
+            "YouTube Data API v3 is disabled for your Google Cloud project: enable it in the console, then retry".into()
+        }
+        ("quotaExceeded" | "rateLimitExceeded" | "dailyLimitExceeded", _) | (_, 429) => {
+            "YouTube API quota exceeded: try again later".into()
+        }
+        ("insufficientPermissions" | "ACCESS_TOKEN_SCOPE_INSUFFICIENT", _) => {
+            "Login lacks YouTube access: run `termusic logout`, then `login` and allow YouTube".into()
+        }
+        ("youtubeSignupRequired" | "channelNotFound", _) => {
+            "This Google account has no YouTube channel".into()
+        }
+        ("playlistNotFound", _) | (_, 404) => "Playlist not found".into(),
+        ("playlistForbidden" | "forbidden", _) => "YouTube denied access to this playlist".into(),
+        (_, 401) => "Login expired or revoked: run `termusic logout`, then `login`".into(),
+        _ => {
+            let m = e["message"].as_str().unwrap_or("request failed");
+            format!("YouTube API error {status}: {}", m.chars().take(100).collect::<String>())
+        }
+    }
 }
 
 /// Search via yt-dlp so it works without a Google account.
@@ -150,6 +183,18 @@ fn parse(v: &Value) -> Vec<Track> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn api_errors_are_described() {
+        let b = |r: &str| serde_json::json!({"error": {"errors": [{"reason": r}], "message": "m"}});
+        assert!(api_error(403, &b("accessNotConfigured")).contains("disabled"));
+        assert!(api_error(403, &b("quotaExceeded")).contains("quota"));
+        assert!(api_error(403, &b("insufficientPermissions")).contains("logout"));
+        assert!(api_error(403, &b("youtubeSignupRequired")).contains("no YouTube channel"));
+        assert!(api_error(404, &b("playlistNotFound")).contains("not found"));
+        assert!(api_error(401, &Value::Null).contains("expired"));
+        assert_eq!(api_error(500, &b("x")), "YouTube API error 500: m");
+    }
+
     use super::*;
 
     #[test]
