@@ -37,13 +37,7 @@ final class Bar: NSObject {
         s.target = self
         s.action = sel
         s.isContinuous = true
-        s.frame = NSRect(x: 16, y: 2, width: 168, height: 20)
-        let name = NSTextField(labelWithString: label)
-        name.font = NSFont.menuFont(ofSize: 0)
-        name.frame = NSRect(x: 16, y: 24, width: 168, height: 16)
-        let v = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 44))
-        v.addSubview(name)
-        v.addSubview(s)
+        let v = sliderRow(label, s)
         let i = NSMenuItem()
         i.view = v
         return i
