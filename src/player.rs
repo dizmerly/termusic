@@ -26,6 +26,8 @@ pub const HISS_NOISE: &str = "anoisesrc=color=pink";
 pub const HISS_AMPLITUDE: f64 = 0.5;
 /// Shapes the noise toward tape hiss: no rumble, the high end left.
 pub const HISS_FILTER: &str = "highpass=f=1000";
+/// Respawns of a dead hiss mpv per session before it stays off, quietly.
+const HISS_RETRIES: u8 = 3;
 /// How often the meter thread reads the levels.
 const LEVEL_EVERY: Duration = Duration::from_millis(100);
 
@@ -65,6 +67,8 @@ pub struct Player {
     hiss: Option<Running>,
     /// The pause state last sent to the hiss mpv.
     hiss_paused: bool,
+    /// Hiss mpvs that died or failed to start this session; past `HISS_RETRIES` it gives up.
+    hiss_deaths: u8,
 }
 
 /// An in-progress crossfade between `current` and `next`.
@@ -227,6 +231,7 @@ impl Player {
             hiss_level: 0,
             hiss: None,
             hiss_paused: false,
+            hiss_deaths: 0,
         }
     }
 
@@ -244,9 +249,17 @@ impl Player {
             }
             return;
         }
+        if self
+            .hiss
+            .as_mut()
+            .is_some_and(|h| h.mpv.try_wait().ok().flatten().is_some())
+        {
+            self.hiss.take().unwrap().kill(); // reap it and its watchdog
+            self.hiss_deaths += 1;
+        }
         let paused = !self.playing;
         match &self.hiss {
-            None if !paused => {
+            None if !paused && self.hiss_deaths <= HISS_RETRIES => {
                 self.spawned += 1;
                 let sock = hiss_sock(std::process::id(), self.spawned);
                 let vol = hiss_volume(self.volume, self.hiss_level);
@@ -255,6 +268,7 @@ impl Player {
                     .spawn()
                     .ok()
                     .and_then(|c| wrap(c, sock, "hiss", "hiss").ok());
+                self.hiss_deaths += u8::from(self.hiss.is_none()); // could not start: counts too
                 self.hiss_paused = false;
             }
             // Until its socket is up the send fails and is retried on the next call.
@@ -1215,6 +1229,33 @@ mod tests {
             "{url}"
         );
         assert!(!url.contains("duration") && !a.iter().any(|x| x.starts_with("--af")));
+    }
+
+    #[test]
+    fn dead_hiss_is_respawned_three_times_then_given_up() {
+        let mut p = Player::new(80);
+        p.mpv = "true".into(); // exits at once: never a real mpv
+        p.hiss_on = true;
+        let r = fake(&mut p, "c", "60");
+        p.set_current(r);
+        p.sync_hiss();
+        assert!(p.hiss.is_some());
+        for n in 1..=HISS_RETRIES {
+            assert!(wait_until(|| {
+                p.sync_hiss();
+                p.hiss_deaths == n
+            }));
+            assert!(p.hiss.is_some(), "respawned after death {n}");
+        }
+        assert!(wait_until(|| {
+            p.sync_hiss();
+            p.hiss.is_none()
+        }));
+        for _ in 0..3 {
+            p.sync_hiss();
+        }
+        assert!(p.hiss.is_none() && p.hiss_deaths == HISS_RETRIES + 1);
+        p.stop();
     }
 
     #[test]
