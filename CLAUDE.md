@@ -24,6 +24,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `auth.rs`: optional Google OAuth 2.0 loopback-redirect flow (Desktop client; device flow is rejected for it), only needed for playlists; tokens in `tokens.json` (0600) in the user config dir, refreshed automatically.
 - `youtube.rs`: search via `yt-dlp` (no account; `config::TOP_K`, default 30); playlists via YouTube Data API v3 (first 50 tracks).
 - `player.rs`: spawns `mpv --no-video` on a YouTube URL (yt-dlp backend), controlled over mpv's JSON IPC socket (pause, skip, volume). Each track also gets a tiny `sh` watchdog that kills mpv and removes its socket if the app dies without cleanup (SIGKILL).
+- `remote.rs`: control socket: JSON lines over a Unix socket in the config dir (0600; `termusic.lock` so one instance owns it). Each request becomes `Msg::Remote`, handled in `App::tick` by the same setters and `dispatch` as the keys; playback commands get the same offline and disabled gates (`cmd_gate`); state goes out on a watch channel when it changes.
+- `helper/`: SwiftPM `TermusicBar` menu bar app. The `TermusicProtocol` library has no AppKit. `swift test` does not build under the command line tools here, so `TermusicBar --selftest` runs the same checks.
 - `commands/`: one file per user command (`play`, `pause`, `skip`, `shuffle`, `search`, `help`, ...). **Each file begins with `pub const ENABLED: bool` (and any other feature flags) at the very top**; `commands/mod.rs` consults them when dispatching, and `help` lists only enabled commands with descriptions.
 
 ## Conventions

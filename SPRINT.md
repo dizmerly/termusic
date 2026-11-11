@@ -97,3 +97,10 @@ Plan: `~/.claude/plans/optimized-launching-eagle.md`. Each item: 3 iterations (c
 - Transport key caps widened to 6 with a one-column gap before the mode keys; key row is the 34-column cassette width.
 - Crates used: `image` 0.25 (jpeg), `ratatui-image` 11.1 (crossterm). Tests: 235 passed, 2 ignored. Verified live in a pty with mpv and yt-dlp; crisp path not yet checked in a real image terminal.
 - Full write-up, test table and open review items: `docs/overhaul-specs/m3-art-report.md`
+
+## Sprint 3 overhaul, milestone 4: Remote control and menu bar helper (branch `overhaul-4-helper`)
+- Control socket `termusic.sock` in the config dir (0600, `termusic.lock` so one instance owns it). Requests go through the same `App` setters and `dispatch` as the keys, with the same offline and disabled gates (`src/remote.rs`, `App::apply`).
+- Protocol: playback commands, settings and `get state`. State lines on connect, after each request, and on change (watch channel). Parser tests and socket tests in `src/remote.rs`.
+- Menu bar helper in `helper/` (SwiftPM `TermusicBar`): title, transport, volume, shuffle, loop, settings submenu. Reconnects every 2 s; renders only the last state line. `--selftest` runs the protocol checks, since `swift test` does not build under the command line tools.
+- Not verified: the menu look and feel, slider feel and throttle, a second OS user trying to connect.
+- Full write-up, test table and open review items: `docs/overhaul-specs/m4-helper-report.md`
