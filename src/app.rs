@@ -461,7 +461,11 @@ impl App {
 
     /// Perform a playback command (from a key today; media keys later). Errors go to the status bar.
     pub fn dispatch(&mut self, c: Cmd) {
-        if self.settings.animations && matches!(c, Cmd::Next | Cmd::Prev | Cmd::Seek(_)) {
+        // Reels hold when paused or idle: whirr only while a track plays.
+        if self.settings.animations
+            && self.player.playing
+            && matches!(c, Cmd::Next | Cmd::Prev | Cmd::Seek(_))
+        {
             self.anim.whirr = Some(Instant::now());
         }
         let r = self.run(c);
@@ -1985,7 +1989,7 @@ mod tests {
         for (on, playing, whirr, want) in [
             (true, false, false, false),
             (true, true, false, true),
-            (true, false, true, true),
+            (true, false, true, false), // a stale whirr does not wake a paused deck
             (false, true, false, false),
             (false, false, true, false),
         ] {
@@ -2039,6 +2043,7 @@ mod tests {
     #[test]
     fn seek_next_and_prev_whirr_only_with_animations() {
         let mut a = app();
+        a.player.playing = true;
         a.dispatch(Cmd::Seek(5));
         assert!(a.anim.whirr.is_some());
         a.anim.whirr = None;
@@ -2046,6 +2051,18 @@ mod tests {
         a.dispatch(Cmd::Prev);
         a.dispatch(Cmd::Seek(-5));
         assert!(a.anim.whirr.is_none());
+    }
+
+    #[test]
+    fn idle_or_paused_deck_does_not_whirr() {
+        let mut a = app();
+        for c in [Cmd::Next, Cmd::Seek(5), Cmd::Prev] {
+            a.dispatch(c); // empty deck
+            assert!(a.anim.whirr.is_none() && !a.anim.whirring()); // a cap press may still animate
+        }
+        a.player.now_playing = Some("1".into());
+        a.dispatch(Cmd::Seek(5)); // loaded but paused
+        assert!(a.anim.whirr.is_none() && !a.anim.whirring()); // a cap press may still animate
     }
 
     #[test]

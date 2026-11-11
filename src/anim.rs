@@ -137,9 +137,9 @@ impl Anim {
         self.whirr.is_some_and(|t| self.since(t) < WHIRR) || self.phase() == Some(Phase::Seat)
     }
 
-    /// A timed effect (not plain playback) is still running.
+    /// A timed effect other than the whirr (which only counts while playing) is still running.
     pub fn busy(&self) -> bool {
-        self.whirring() || self.pressed_key().is_some() || self.phase().is_some()
+        self.pressed_key().is_some() || self.phase().is_some()
     }
 
     /// The cap held down by a momentary press.
@@ -192,8 +192,8 @@ impl Anim {
         self.now = now;
         let frame =
             (now.saturating_duration_since(self.start).as_millis() / FRAME.as_millis()) as u64;
-        let whirr = self.whirring();
-        if playing || whirr {
+        let whirr = playing && self.whirring(); // reels hold when paused or idle
+        if playing {
             self.reel += reel_steps(self.frame, frame, whirr) as usize;
         }
         self.frame = frame;
@@ -257,10 +257,10 @@ mod tests {
         a.whirr = Some(t0 + ms(1050));
         a.advance(t0 + ms(1250), true, 0, None); // whirr: a step per frame
         assert_eq!(a.reel, 7);
-        a.advance(t0 + ms(1400), false, 0, None); // still whirring at 350 ms, even paused
-        assert_eq!(a.reel, 10);
+        a.advance(t0 + ms(1400), false, 0, None); // paused: holds even mid-whirr
+        assert_eq!(a.reel, 7);
         a.advance(t0 + ms(2000), false, 0, None);
-        assert_eq!(a.reel, 10);
+        assert_eq!(a.reel, 7);
         assert!(!a.busy());
     }
 
