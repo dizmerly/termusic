@@ -84,11 +84,15 @@ pub fn should_query(
         || kitty_window_id.is_some_and(|k| !k.is_empty())
 }
 
+fn normalize(v: &str) -> String {
+    v.trim().to_ascii_lowercase()
+}
+
 /// Decide the path once at startup (raw mode on); the picker is kept only for `Crisp`.
-/// The query runs only where `should_query` says so; a silent terminal costs at most 250 ms.
+/// The query runs only where `should_query` says so; a silent terminal costs at most 1 s.
 pub fn detect() -> (ArtPath, Option<Picker>) {
     let var = |k| std::env::var(k).ok();
-    let env = var("TERMUSIC_ART");
+    let env = var("TERMUSIC_ART").map(|v| normalize(&v));
     let (tp, term, kw) = (var("TERM_PROGRAM"), var("TERM"), var("KITTY_WINDOW_ID"));
     if !should_query(
         env.as_deref(),
@@ -100,11 +104,16 @@ pub fn detect() -> (ArtPath, Option<Picker>) {
     }
     // The crate's stdin-reading query thread outlives its timeout and would eat every keystroke
     // if the terminal never answers, hence the hint check above.
+    // 1 s: hinted terminals answer fast, and a slow SSH round trip must not leak into keystrokes.
+    let timeout = Duration::from_millis(1000);
+    let start = std::time::Instant::now();
     let picker = Picker::from_query_stdio_with_options(QueryStdioOptions {
-        timeout: Duration::from_millis(250),
+        timeout,
         ..Default::default()
     })
-    .ok();
+    .ok()
+    // A full-timeout query got no answer: the crate returns an env-guessed picker, not trusted.
+    .filter(|_| start.elapsed() < timeout);
     let path = choose(env.as_deref(), picker.as_ref().map(Picker::protocol_type));
     (path, picker.filter(|_| path == ArtPath::Crisp))
 }
@@ -123,6 +132,7 @@ pub fn upscale(grid: &Grid, w: u32, h: u32) -> RgbImage {
 pub fn protocol(picker: &Picker, src: &Source, shell: &theme::Shell) -> Option<Protocol> {
     let grid = pixelize(src, 20, &shell_palette(shell));
     let font = picker.font_size();
+    // shortcut: sixel/iTerm2 images are sized from the startup font size; a later font-size change can overflow the slot. Rebuild on resize if users report it.
     let img = upscale(&grid, 10 * font.width as u32, 5 * font.height as u32);
     picker
         .new_protocol(img.into(), Size::new(10, 5), Resize::Fit(None))
@@ -137,11 +147,20 @@ pub fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+/// Append `chunk` unless the total would pass `max`; `false` means over the cap.
+fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], max: usize) -> bool {
+    if buf.len() + chunk.len() > max {
+        return false;
+    }
+    buf.extend_from_slice(chunk);
+    true
+}
+
 /// Download the track's thumbnail and decode it; `None` on any failure (art is optional, so
 /// errors stay silent). The caller validates `id`.
 pub async fn fetch(id: &str) -> Option<Source> {
-    const MAX: u64 = 1 << 20;
-    let resp = reqwest::Client::builder()
+    const MAX: usize = 1 << 20;
+    let mut resp = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .ok()?
@@ -151,12 +170,14 @@ pub async fn fetch(id: &str) -> Option<Source> {
         .ok()?
         .error_for_status()
         .ok()?;
-    if resp.content_length().is_some_and(|n| n > MAX) {
+    if resp.content_length().is_some_and(|n| n > MAX as u64) {
         return None;
     }
-    let bytes = resp.bytes().await.ok()?;
-    if bytes.len() as u64 > MAX {
-        return None;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if !push_capped(&mut bytes, &chunk, MAX) {
+            return None;
+        }
     }
     tokio::task::spawn_blocking(move || decode(&bytes))
         .await
@@ -350,6 +371,29 @@ mod tests {
                 Some("7")
             ));
         }
+    }
+
+    #[test]
+    fn push_capped_stops_past_the_cap() {
+        let mut b = Vec::new();
+        assert!(push_capped(&mut b, &[1, 2, 3], 5));
+        assert!(push_capped(&mut b, &[4, 5], 5)); // exactly at the cap is fine
+        assert!(!push_capped(&mut b, &[6], 5));
+        assert_eq!(b, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn art_env_is_case_and_whitespace_insensitive() {
+        let norm = normalize;
+        assert_eq!(choose(Some(&norm(" OFF ")), None), ArtPath::Off);
+        assert_eq!(choose(Some(&norm("HalfBlocks")), None), ArtPath::HalfBlocks);
+        assert!(should_query(Some(&norm("Detect")), None, None, None));
+        assert!(!should_query(
+            Some(&norm(" OFF ")),
+            Some("kitty"),
+            None,
+            None
+        ));
     }
 
     #[test]

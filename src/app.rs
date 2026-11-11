@@ -170,7 +170,7 @@ pub struct App {
     pub anim: Anim,
     /// Decoded covers by video id, oldest first.
     pub art: Vec<(String, art::Source)>,
-    /// Ids whose cover was requested this session (done, failed or in flight): never again.
+    /// Ids whose cover is cached or in flight; dropped on eviction or a failed fetch.
     art_tried: HashSet<String>,
     /// How covers are drawn this session (decided once at startup).
     pub art_path: art::ArtPath,
@@ -304,18 +304,29 @@ impl App {
                 self.art_noted = true;
             }
         }
-        let id = self
-            .player
-            .now_playing
-            .as_ref()
-            .and_then(|_| self.queue.current());
-        if let Some(id) = id.filter(|_| on).map(|t| t.id.clone()) {
-            self.request_art(&id);
+        if on {
+            self.request_current_art();
+            if let Some(id) = self.player.preloaded_id().map(str::to_owned) {
+                self.request_art(&id);
+            }
         }
         self.save_settings();
     }
 
-    /// Fetch a track's cover once per session. Failures stay silent: no status, no Offline.
+    /// Ask for the loaded current track's cover (a no-op when nothing plays).
+    fn request_current_art(&mut self) {
+        let id = self
+            .player
+            .now_playing
+            .as_ref()
+            .and_then(|_| self.queue.current())
+            .map(|t| t.id.clone());
+        if let Some(id) = id {
+            self.request_art(&id);
+        }
+    }
+
+    /// Fetch a track's cover unless cached or in flight (`art_tried`). Failures stay silent: no status, no Offline.
     fn request_art(&mut self, id: &str) {
         if !self.settings.thumbnails
             || self.art_path == art::ArtPath::Off
@@ -469,10 +480,14 @@ impl App {
                     self.art.retain(|(i, _)| *i != id);
                     self.art.push((id, src));
                     if self.art.len() > ART_CACHE {
-                        self.art.remove(0);
+                        let (old, _) = self.art.remove(0);
+                        self.art_tried.remove(&old);
                     }
                 }
-                Msg::Art(_, None) => {}
+                // A failed fetch may be asked again at the next natural trigger, never in a loop.
+                Msg::Art(id, None) => {
+                    self.art_tried.remove(&id);
+                }
                 Msg::LoggedIn => {
                     self.login_url = None;
                     self.status = "signed in".into();
@@ -581,6 +596,7 @@ impl App {
             }
             Event::Connection(true) => {
                 self.set_tab(Screen::Results);
+                self.request_current_art();
             }
             Event::Connection(false) => {
                 self.save_sel();
@@ -2260,22 +2276,97 @@ mod tests {
         assert_eq!(a.art_tried.len(), 1);
     }
 
+    const NEXT_ID: &str = "aaaaaaaaaaa";
+
+    fn art_queue(a: &mut App) {
+        let t = |id: &str| Track {
+            title: id.into(),
+            channel: String::new(),
+            id: id.into(),
+        };
+        a.queue.set(vec![t(COVER_ID), t(NEXT_ID)], 0);
+    }
+
     #[test]
-    fn one_request_per_track_across_started_and_preload() {
+    fn track_started_alone_requests_the_current_id() {
         let mut a = art_app(true);
-        let id = "dQw4w9WgXcQ";
-        a.queue.set(
-            vec![Track {
-                title: "t".into(),
-                channel: String::new(),
-                id: id.into(),
-            }],
-            0,
-        );
-        a.request_art(id); // the preload's request
-        a.on_event(Event::TrackStarted(id.into()));
+        art_queue(&mut a);
+        a.on_event(Event::TrackStarted(COVER_ID.into()));
         assert_eq!(a.art_tried.len(), 1);
-        assert!(a.art_tried.contains(id));
+        assert!(a.art_tried.contains(COVER_ID));
+    }
+
+    #[test]
+    fn preload_alone_requests_the_next_id_and_both_make_one_request_each() {
+        let mut a = art_app(true);
+        art_queue(&mut a);
+        a.player.fake_current(COVER_ID);
+        a.sync_preload();
+        assert_eq!(a.art_tried.len(), 1);
+        assert!(a.art_tried.contains(NEXT_ID));
+        a.on_event(Event::TrackStarted(COVER_ID.into()));
+        a.on_event(Event::TrackStarted(NEXT_ID.into()));
+        assert_eq!(a.art_tried.len(), 2);
+    }
+
+    #[test]
+    fn an_evicted_id_can_be_requested_again() {
+        let mut a = art_app(true);
+        a.request_art(COVER_ID);
+        a.tx.send(Msg::Art(COVER_ID.into(), Some(cover()))).unwrap();
+        for i in 0..8 {
+            a.tx.send(Msg::Art(i.to_string(), Some(cover()))).unwrap();
+        }
+        a.tick();
+        assert!(!a.art.iter().any(|(i, _)| i == COVER_ID));
+        assert!(!a.art_tried.contains(COVER_ID));
+        a.request_art(COVER_ID);
+        assert!(a.art_tried.contains(COVER_ID));
+    }
+
+    #[test]
+    fn a_failed_id_is_asked_again_on_its_next_track_started() {
+        let mut a = art_app(true);
+        art_queue(&mut a);
+        a.on_event(Event::TrackStarted(COVER_ID.into()));
+        a.tx.send(Msg::Art(COVER_ID.into(), None)).unwrap();
+        a.tick();
+        assert!(a.art_tried.is_empty()); // no retry loop: tick alone asks nothing
+        a.on_event(Event::TrackStarted(COVER_ID.into()));
+        assert!(a.art_tried.contains(COVER_ID));
+    }
+
+    #[test]
+    fn an_in_flight_id_is_not_requested_twice() {
+        let mut a = art_app(true);
+        a.request_art(COVER_ID);
+        a.art_tried.insert("marker".into());
+        a.request_art(COVER_ID);
+        a.on_event(Event::TrackStarted(COVER_ID.into()));
+        a.sync_preload();
+        assert_eq!(a.art_tried.len(), 2); // the id and the marker: nothing re-inserted
+        a.art_tried.remove("marker");
+        assert!(!a.art_tried.insert(COVER_ID.into())); // still marked in flight
+    }
+
+    #[test]
+    fn reconnecting_fetches_the_current_cover() {
+        let mut a = art_app(true);
+        art_queue(&mut a);
+        a.player.now_playing = Some(COVER_ID.into());
+        a.on_event(Event::Connection(false));
+        a.request_art(COVER_ID); // offline: skipped
+        assert!(a.art_tried.is_empty());
+        a.on_event(Event::Connection(true));
+        assert!(a.art_tried.contains(COVER_ID));
+    }
+
+    #[test]
+    fn turning_cover_art_on_also_requests_the_preloaded_track() {
+        let mut a = art_app(false);
+        a.player.fake_preload(NEXT_ID);
+        a.set_thumbnails(true);
+        assert!(a.art_tried.contains(NEXT_ID));
     }
 
     #[test]

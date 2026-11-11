@@ -439,7 +439,7 @@ mod tests {
         let r = rows(&mut off, 80, 24);
         assert_eq!(r, rows(&mut plain, 80, 24));
         assert!(r.iter().any(|l| l.contains("│ │ A ──")));
-        assert!(r.iter().all(|l| !l.contains("▀▀▀▀")));
+        assert!(r.iter().all(|l| !l.contains("▀▀▀▀▀▀▀▀▀▀")));
     }
 
     #[test]
@@ -456,6 +456,47 @@ mod tests {
                 .filter(|&(x, y)| b[(x as u16, y as u16)].symbol() == "▀")
                 .count();
             assert_eq!(blocks > 0, shown, "{ms} ms");
+        }
+    }
+
+    /// A cover-on app on the crisp path with a flat accent protocol cached (halfblocks picker).
+    fn with_crisp_cover() -> (App, ratatui::style::Color) {
+        use ratatui_image::picker::Picker;
+        let mut a = with_cover(true);
+        a.art_path = crate::art::ArtPath::Crisp;
+        a.picker = Some(Picker::halfblocks());
+        let accent = a.shell().accent;
+        let ratatui::style::Color::Rgb(r, g, b) = accent else {
+            panic!("accent must be rgb")
+        };
+        let src = image::RgbImage::from_pixel(40, 40, image::Rgb([r, g, b]));
+        let proto = crate::art::protocol(a.picker.as_ref().unwrap(), &src, a.shell());
+        a.cover_proto = Some((a.cover_key().unwrap(), proto));
+        (a, accent)
+    }
+
+    #[test]
+    fn crisp_image_hides_in_eject_and_insert_and_shows_when_seated() {
+        for (ms, shown) in [(80, false), (280, false), (500, true)] {
+            let (mut a, accent) = with_crisp_cover();
+            let at = a.anim.now - std::time::Duration::from_millis(ms);
+            a.anim.swap = Some((at, "Take On Me".into(), "a-ha".into()));
+            // The image cells carry no "A ──" text, so find the slot on the placeholder layout.
+            let r = rows(&mut with_cover(false), 80, 24);
+            let y0 = r.iter().position(|l| l.contains("A ──")).unwrap();
+            let x0 = r[y0]
+                .find("A ──")
+                .map(|i| r[y0][..i].chars().count())
+                .unwrap()
+                - ART_W
+                - 1;
+            let b = buffer(&mut a, 80, 24);
+            let hit = (y0..y0 + 5)
+                .flat_map(|y| (x0..x0 + ART_W).map(move |x| (x as u16, y as u16)))
+                .filter(|&p| b[p].bg == accent)
+                .count();
+            assert_eq!(hit == 50, shown, "{ms} ms");
+            assert!(shown || hit == 0, "{ms} ms: plain paper while swapping");
         }
     }
 
@@ -506,12 +547,12 @@ mod tests {
         assert!(r.iter().any(|l| l.contains("Never Gonna Give")));
         assert!(r.iter().any(|l| l.contains("072  ━") && l.contains("1:12")));
         // Play, shuffle and loop are latched down; the rest stand on their shadows.
-        let keys = r.iter().position(|l| l.contains("│◀◀ │")).unwrap() - 1;
+        let keys = r.iter().position(|l| l.contains("│ ◀◀ │")).unwrap() - 1;
         for (i, want) in [
-            "┌───┐     ┌───┐┌───┐          ",
-            "│◀◀ │┌───┐│▮▮ ││▶▶ │┌───┐┌───┐",
-            "└─b─┘│ ▶ │└─p─┘└─n─┘│ ⤮ ││↻1 │",
-            " ▀▀▀ └─p─┘ ▀▀▀  ▀▀▀ └─s─┘└─l─┘",
+            "┌────┐     ┌────┐┌────┐          ",
+            "│ ◀◀ │┌───┐│ ▮▮ ││ ▶▶ │┌───┐┌───┐",
+            "└─b──┘│ ▶ │└─p──┘└─n──┘│ ⤮ ││↻1 │",
+            " ▀▀▀▀ └─p─┘ ▀▀▀▀  ▀▀▀▀ └─s─┘└─l─┘",
         ]
         .iter()
         .enumerate()
@@ -570,7 +611,13 @@ mod tests {
 
     #[test]
     fn nothing_panics_at_any_size() {
-        let mut apps = [blank(), playing()];
+        let mut apps = [
+            blank(),
+            playing(),
+            with_cover(true),
+            with_cover(false),
+            with_crisp_cover().0,
+        ];
         apps[1].screen = Screen::Queue;
         for a in &mut apps {
             for (w, h) in [
@@ -685,13 +732,13 @@ mod tests {
             .unwrap();
         let strip = r.iter().position(|l| l.contains("1 RESULTS")).unwrap();
         assert!(top < strip && 34 - strip >= 11, "J-card keeps 10+ rows");
-        assert!(r.iter().any(|l| l.contains("└─b─┘")));
+        assert!(r.iter().any(|l| l.contains("└─b──┘")));
         let r = rows(&mut a, 38, 31); // narrowest pocket: the volume bar goes, the rest fits
         assert!(r[0].contains("⤮ ↻1 ── VOL 70% ─╮") && r[0].starts_with("╭─ TERMUSIC"));
         let strip = r.iter().position(|l| l.contains("1 RESULTS")).unwrap();
         assert_eq!(30 - strip, 10, "J-card rows above the bottom border");
         assert!(r[strip - 1].contains("queued: Take On Me"));
-        assert!(r.iter().any(|l| l.contains("└─b─┘")));
+        assert!(r.iter().any(|l| l.contains("└─b──┘")));
         a.status.clear();
         let r = rows(&mut a, 60, 16);
         assert!(!r[0].contains("TERMUSIC") && r[0].contains("1 RESULTS"));

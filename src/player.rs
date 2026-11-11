@@ -348,6 +348,15 @@ impl Player {
         self.next = Some(wrap(child, sock, id, id).unwrap());
     }
 
+    /// Test hook: pretend `id` is playing and nearly over, so a preload is due.
+    #[cfg(test)]
+    pub(crate) fn fake_current(&mut self, id: &str) {
+        let sock = self.next_sock();
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        self.set_current(wrap(child, sock, id, id).unwrap());
+        self.duration = Some(1.0);
+    }
+
     /// Whether a preload of `id` should start now.
     pub fn wants_preload(&self, id: &str) -> bool {
         let done = self.next.is_some() || self.tried.as_deref() == Some(id);

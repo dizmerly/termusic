@@ -281,8 +281,8 @@ pub fn meter_row(s: &Shell, m: Option<[(usize, usize); 2]>) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Six 5 x 3 transport key caps in 4 rows of 30 columns: prev, play, pause, next, shuffle,
-/// loop. An up cap sits in rows 1-3 over a shadow; a down cap (latched by its state, or
+/// Six transport key caps in 4 rows of 33 columns (prev, pause, next are 6 x 3, the rest
+/// 5 x 3): prev, play, pause, next, shuffle, loop. An up cap sits in rows 1-3 over a shadow; a down cap (latched by its state, or
 /// `pressed` for a moment) sits in rows 2-4, lit.
 pub fn key_caps(
     s: &Shell,
@@ -324,29 +324,39 @@ pub fn key_caps(
         } else {
             (fg(s.frame), fg(s.text))
         };
-        let gap = 3usize.saturating_sub(glyph.width());
+        // The 2-column transport glyphs get a space each side; the other caps stay 3 inside.
+        let wide = matches!(k, Key::Prev | Key::Pause | Key::Next);
+        let inner = if wide { glyph.width() + 2 } else { 3 };
+        let gap = inner.saturating_sub(glyph.width());
         let text = format!(
             "{}{glyph}{}",
             " ".repeat(gap / 2),
             " ".repeat(gap - gap / 2)
         );
+        let bar = "─".repeat(inner);
+        let label = if wide {
+            format!("└─{key}──┘")
+        } else {
+            format!("└─{key}─┘")
+        };
         let cap = [
-            vec![Span::styled("┌───┐", edge)],
+            vec![Span::styled(format!("┌{bar}┐"), edge)],
             vec![
                 Span::styled("│", edge),
                 Span::styled(text, face),
                 Span::styled("│", edge),
             ],
-            vec![Span::styled(format!("└─{key}─┘"), edge)],
+            vec![Span::styled(label, edge)],
         ];
         let top = usize::from(down);
         for (row, spans) in rows[top..].iter_mut().zip(cap) {
             row.extend(spans);
         }
         if down {
-            rows[0].push(Span::raw("     "));
+            rows[0].push(Span::raw(" ".repeat(inner + 2)));
         } else {
-            rows[3].push(Span::styled(" ▀▀▀ ", fg(s.dim)));
+            let shadow = format!(" {} ", "▀".repeat(inner));
+            rows[3].push(Span::styled(shadow, fg(s.dim)));
         }
     }
     rows.into_iter().map(Line::from).collect()
@@ -717,7 +727,10 @@ mod tests {
         }
     }
 
-    /// Cell `cap` (5 columns) of each key row, with the color of its middle column.
+    /// Cap widths in order prev, play, pause, next, shuffle, loop.
+    const CAP_W: [usize; 6] = [6, 5, 6, 6, 5, 5];
+
+    /// Cell `cap` of each key row, with the color of its second column.
     fn caps_cell(l: &[Line], cap: usize) -> Vec<(String, Option<ratatui::style::Color>)> {
         l.iter()
             .map(|row| {
@@ -726,24 +739,31 @@ mod tests {
                     .iter()
                     .flat_map(|sp| sp.content.chars().map(move |c| (c, sp.style)))
                     .collect();
-                let c = &cells[cap * 5..cap * 5 + 5];
+                let at = CAP_W[..cap].iter().sum::<usize>();
+                let c = &cells[at..at + CAP_W[cap]];
                 (c.iter().map(|x| x.0).collect(), c[2].1.fg)
             })
             .collect()
     }
 
     #[test]
-    fn key_caps_are_5_wide_4_rows_and_press_down() {
+    fn key_caps_are_6_and_5_wide_4_rows_and_press_down() {
         let s = &TPS_L2;
         let down = |l: &[Line], cap: usize| {
             let c = caps_cell(l, cap);
-            let d = c[0].0 == "     ";
+            let d = c[0].0.trim().is_empty();
+            let wide = CAP_W[cap] == 6;
+            let (top, shadow) = if wide {
+                ("┌────┐", " ▀▀▀▀ ")
+            } else {
+                ("┌───┐", " ▀▀▀ ")
+            };
             if d {
-                assert_eq!(c[1].0, "┌───┐");
+                assert_eq!(c[1].0, top);
                 assert!(c[2].1 == Some(s.accent) && c[3].0.starts_with("└─")); // lit while down
             } else {
-                assert!(c[0].0 == "┌───┐" && c[2].0.starts_with("└─"));
-                assert_eq!((c[3].0.as_str(), c[3].1), (" ▀▀▀ ", Some(s.dim)));
+                assert!(c[0].0 == top && c[2].0.starts_with("└─"));
+                assert_eq!((c[3].0.as_str(), c[3].1), (shadow, Some(s.dim)));
                 assert_eq!(c[1].1, Some(s.text));
             }
             d
@@ -752,7 +772,7 @@ mod tests {
             for pressed in [None, Some(Key::Next), Some(Key::Loop)] {
                 let l = key_caps(s, true, true, true, looping, pressed);
                 assert_eq!(l.len(), 4);
-                assert!(l.iter().all(|r| r.width() == 30));
+                assert!(l.iter().all(|r| r.width() == 33 && r.width() <= CASSETTE_W));
                 assert_eq!(
                     down(&l, 5),
                     looping != Loop::Off || pressed == Some(Key::Loop)
@@ -767,10 +787,10 @@ mod tests {
         assert_eq!(
             rows,
             [
-                "┌───┐┌───┐┌───┐┌───┐┌───┐     ",
-                "│◀◀ ││ ▶ ││▮▮ ││▶▶ ││ ⤮ │┌───┐",
-                "└─b─┘└─p─┘└─p─┘└─n─┘└─s─┘│↻1 │",
-                " ▀▀▀  ▀▀▀  ▀▀▀  ▀▀▀  ▀▀▀ └─l─┘",
+                "┌────┐┌───┐┌────┐┌────┐┌───┐     ",
+                "│ ◀◀ ││ ▶ ││ ▮▮ ││ ▶▶ ││ ⤮ │┌───┐",
+                "└─b──┘└─p─┘└─p──┘└─n──┘└─s─┘│↻1 │",
+                " ▀▀▀▀  ▀▀▀  ▀▀▀▀  ▀▀▀▀  ▀▀▀ └─l─┘",
             ]
         );
         let all = |l: &[Line]| (0..6).map(|c| down(l, c)).collect::<Vec<_>>();
