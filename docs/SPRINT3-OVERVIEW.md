@@ -89,7 +89,7 @@ Verification:
 
 ### 2. Animations and cassette hiss
 
-Status: in progress on branch overhaul-2-motion, unreviewed, see the handoff section
+Status: built on branch overhaul-2-motion, not finished (4 fixes, live check, review); parked 2026-11-10 to build milestones 3 and 4 first. See the handoff section and the approved decisions under its Remaining work
 
 Branch `overhaul-2-motion`.
 
@@ -111,7 +111,7 @@ Verification:
 
 ### 3. Pixel-art thumbnails
 
-Status: planned
+Status: built and reviewed on branch overhaul-3-art (stacked on overhaul-2-motion), not merged. Report: `docs/overhaul-specs/m3-art-report.md`
 
 Branch `overhaul-3-art`.
 
@@ -128,7 +128,7 @@ Verification: unit tests for the pure functions; checked by eye in Ghostty (cris
 
 ### 4. Control socket and menu bar helper
 
-Status: planned
+Status: built and reviewed on branch overhaul-4-helper (stacked on overhaul-3-art), not merged. Report: `docs/overhaul-specs/m4-helper-report.md`
 
 Branch `overhaul-4-helper`.
 
@@ -613,6 +613,12 @@ Render with `n` held down (momentary press; the meters are unlit because no leve
 
 #### Remaining work
 
+Decisions the user approved on 2026-11-10 before milestone 2 was parked (apply them when resuming):
+- Reels hold when paused or idle: no whirr on seek, `n` or `b` unless a track is loaded and playing (fix 1.1 below).
+- Meter row 36 columns as the spec draws it (one leading space, three-space gap) (fix 1.2 below). Open question created later: milestone 3 made the key row exactly 34 columns to line up with the cassette, counter and current 34-column meter row (decided with the Fable designer). Widening the meter row to 36 would break that alignment. Ask the user which wins before changing it.
+
+Already confirmed incidentally by the milestone 3 and 4 live runs (real mpv and yt-dlp): the `astats` levels read correctly from a real YouTube stream; the hiss mpv starts from `set hiss`; nothing is left running after quit. Still unchecked: preload and crossfade with the filter, hiss pause/resume and volume following, `kill -9` cleanup, the animations-off loop.
+
 Do these in order.
 
 1. Known unfinished fixes.
@@ -679,6 +685,14 @@ Not verified:
 Known and left alone:
 - Pressing `/` keeps the previous query in the field instead of clearing it, so a new search means deleting the old text first. Easy to change to "select all" or "clear" if you prefer.
 - With a signed-in account, every visit to the Lists tab refetches playlists (also when tabbing past it).
+
+### Milestones 3 and 4
+
+Full lists, with test tables and review results, are at the end of `docs/overhaul-specs/m3-art-report.md` and `docs/overhaul-specs/m4-helper-report.md`. The ones that need you most:
+- The cover art look per shell (dithering, tonal stretch) and the crisp image in Ghostty: nobody has seen it in a real image terminal.
+- The transport key row (wider caps for the two-column glyphs, gap before the mode keys) and the open meter-row width question in milestone 2's Remaining work.
+- The menu bar helper: build with `cd helper && swift build -c release` and run `helper/.build/release/TermusicBar` with termusic open. Nobody has looked at the menu, the sliders or clicked the items. `swift test` does not build under the command line tools here; `TermusicBar --selftest` runs the same checks.
+- Milestone 4 was built without the short design-approval plan promised in the plan, because you said to decide from the documents while you were away.
 
 ### Milestone 2 (unfinished)
 
