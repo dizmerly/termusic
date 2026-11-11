@@ -179,6 +179,10 @@ Checked in a pty with a real `mpv` and `yt-dlp`, using a terminal that does not 
 - No `mpv` was left running after quit.
 - Milestone 2's `astats` level meters read correctly from a real YouTube stream. This is the first real-stream check of milestone 2.
 
+## Known limit (checked live)
+
+In a pty that never answers image queries but whose environment says `TERM_PROGRAM=ghostty`, the query runs and times out: the first frame took 1.33 s, and the search text typed right after startup never reached the app (the crate's query thread reads one more chunk of input after its timeout, then exits). Later input works. Real Ghostty, kitty, iTerm2 and WezTerm answer, so this only bites when an image-terminal hint reaches a terminal path that drops the reply (for example `TERM=xterm-ghostty` over ssh). Workaround: `TERMUSIC_ART=halfblocks`. Without a hint (any other terminal) no query runs and nothing is lost (also checked live).
+
 ## Not verified
 
 - The crisp path in Ghostty, kitty or iTerm2. Only the author can look at this.
