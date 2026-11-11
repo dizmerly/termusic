@@ -8,8 +8,9 @@ use crate::queue::{Loop, Queue};
 use crate::settings::Settings;
 use crate::theme::{self, Shell};
 use crate::youtube::{self, Track};
-use crate::{auth, net};
+use crate::{art, auth, net};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -31,7 +32,12 @@ pub enum Msg {
     PlaylistTracks(String, Vec<Track>),
     /// A background file write failed.
     SaveFailed(String),
+    /// Cover art fetched for the video id (`None`: failed, nothing to show).
+    Art(String, Option<art::Source>),
 }
+
+/// Covers kept in memory.
+const ART_CACHE: usize = 8;
 
 /// Serializes background writes so they land in the order they were requested.
 static IO: Mutex<()> = Mutex::new(());
@@ -91,6 +97,7 @@ impl Screen {
 pub enum Row {
     Volume,
     Shell,
+    CoverArt,
     Animations,
     Hiss,
     HissLevel,
@@ -99,9 +106,10 @@ pub enum Row {
 }
 
 impl Row {
-    pub const ALL: [Row; 7] = [
+    pub const ALL: [Row; 8] = [
         Row::Volume,
         Row::Shell,
+        Row::CoverArt,
         Row::Animations,
         Row::Hiss,
         Row::HissLevel,
@@ -159,6 +167,10 @@ pub struct App {
     /// First visible line of the help screen.
     pub help_scroll: u16,
     pub anim: Anim,
+    /// Decoded covers by video id, oldest first.
+    pub art: Vec<(String, art::Source)>,
+    /// Ids whose cover was requested this session (done, failed or in flight): never again.
+    art_tried: HashSet<String>,
 }
 
 impl App {
@@ -205,6 +217,8 @@ impl App {
             setting_row: 0,
             help_scroll: 0,
             anim: Anim::new(Instant::now()),
+            art: Vec::new(),
+            art_tried: HashSet::new(),
             playlists: Vec::new(),
             from_playlist: false,
             #[cfg(test)]
@@ -247,6 +261,39 @@ impl App {
         self.settings.animations = on;
         self.player.meters = on;
         self.save_settings();
+    }
+
+    /// Cover art on or off and save the choice; turning it on fetches the loaded track's.
+    pub fn set_thumbnails(&mut self, on: bool) {
+        self.settings.thumbnails = on;
+        let id = self
+            .player
+            .now_playing
+            .as_ref()
+            .and_then(|_| self.queue.current());
+        if let Some(id) = id.filter(|_| on).map(|t| t.id.clone()) {
+            self.request_art(&id);
+        }
+        self.save_settings();
+    }
+
+    /// Fetch a track's cover once per session. Failures stay silent: no status, no Offline.
+    fn request_art(&mut self, id: &str) {
+        if !self.settings.thumbnails
+            || self.screen == Screen::Offline
+            || !art::valid_id(id)
+            || !self.art_tried.insert(id.to_owned())
+        {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return; // unit tests: no runtime, nothing to fetch
+        };
+        let (tx, id) = (self.tx.clone(), id.to_owned());
+        rt.spawn(async move {
+            let src = art::fetch(&id).await;
+            let _ = tx.send(Msg::Art(id, src));
+        });
     }
 
     /// Tape hiss on or off; it starts with the next playing frame and is saved.
@@ -331,7 +378,7 @@ impl App {
     /// Apply finished background work and detect the end of the current track. Called every frame.
     pub fn tick(&mut self) {
         while let Ok(m) = self.rx.try_recv() {
-            if !matches!(m, Msg::LoginUrl(_) | Msg::SaveFailed(_)) {
+            if !matches!(m, Msg::LoginUrl(_) | Msg::SaveFailed(_) | Msg::Art(..)) {
                 self.busy = false;
             }
             // Replies never move focus: whoever is typing keeps typing.
@@ -347,6 +394,14 @@ impl App {
                 }
                 Msg::LoginUrl(u) => self.login_url = Some(u),
                 Msg::SaveFailed(e) => self.status = e,
+                Msg::Art(id, Some(src)) => {
+                    self.art.retain(|(i, _)| *i != id);
+                    self.art.push((id, src));
+                    if self.art.len() > ART_CACHE {
+                        self.art.remove(0);
+                    }
+                }
+                Msg::Art(_, None) => {}
                 Msg::LoggedIn => {
                     self.login_url = None;
                     self.status = "signed in".into();
@@ -421,6 +476,7 @@ impl App {
         }
         if let Some(t) = want.filter(|t| self.player.wants_preload(&t.id)) {
             self.player.preload(&t);
+            self.request_art(&t.id);
         }
     }
 
@@ -429,6 +485,7 @@ impl App {
         match e {
             Event::TrackStarted(id) => {
                 self.playing_id = Some(id.clone());
+                self.request_art(&id);
                 let title = self.player.now_playing.clone().unwrap_or_default();
                 let channel = self.queue.current().filter(|t| t.id == id);
                 let channel = channel.map_or(String::new(), |t| t.channel.clone());
@@ -803,6 +860,9 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.setting_row = self.setting_row.saturating_sub(1)
+            }
+            KeyCode::Enter | KeyCode::Left | KeyCode::Right if row == Row::CoverArt => {
+                self.set_thumbnails(!self.settings.thumbnails)
             }
             KeyCode::Enter | KeyCode::Left | KeyCode::Right if row == Row::Animations => {
                 self.set_animations(!self.settings.animations)
@@ -1473,6 +1533,13 @@ mod tests {
         press(&mut a, KeyCode::Char('j'));
         assert_eq!(Row::ALL[a.setting_row], Row::Shell);
         press(&mut a, KeyCode::Char('j'));
+        assert_eq!(Row::ALL[a.setting_row], Row::CoverArt);
+        press(&mut a, KeyCode::Enter);
+        assert!(a.settings.thumbnails);
+        press(&mut a, KeyCode::Right);
+        press(&mut a, KeyCode::Left);
+        assert!(a.settings.thumbnails && a.player.volume == 45); // on, off, on
+        press(&mut a, KeyCode::Char('j'));
         assert_eq!(Row::ALL[a.setting_row], Row::Animations);
         assert!(a.settings.animations);
         press(&mut a, KeyCode::Enter);
@@ -2089,5 +2156,97 @@ mod tests {
         assert_eq!(a.screen, Screen::History);
         assert_eq!(next_tab(1, 1, [false, true, true, true]), 0);
         assert_eq!(next_tab(0, 1, [false, true, true, true]), 0);
+    }
+
+    fn art_app(on: bool) -> App {
+        let mut a = app();
+        a.settings.thumbnails = on;
+        a
+    }
+
+    fn cover() -> art::Source {
+        art::Source::new(40, 40)
+    }
+
+    #[test]
+    fn request_art_skips_when_off_offline_invalid_or_tried() {
+        let id = "dQw4w9WgXcQ";
+        let mut a = art_app(false);
+        a.request_art(id);
+        assert!(a.art_tried.is_empty());
+        let mut a = art_app(true);
+        a.screen = Screen::Offline;
+        a.request_art(id);
+        a.screen = Screen::Results;
+        a.request_art("short");
+        assert!(a.art_tried.is_empty());
+        a.request_art(id);
+        assert_eq!(a.art_tried.len(), 1);
+        a.art_tried.clear();
+        a.art_tried.insert(id.into());
+        a.request_art(id); // already tried: still one entry, nothing new
+        assert_eq!(a.art_tried.len(), 1);
+    }
+
+    #[test]
+    fn one_request_per_track_across_started_and_preload() {
+        let mut a = art_app(true);
+        let id = "dQw4w9WgXcQ";
+        a.queue.set(
+            vec![Track {
+                title: "t".into(),
+                channel: String::new(),
+                id: id.into(),
+            }],
+            0,
+        );
+        a.request_art(id); // the preload's request
+        a.on_event(Event::TrackStarted(id.into()));
+        assert_eq!(a.art_tried.len(), 1);
+        assert!(a.art_tried.contains(id));
+    }
+
+    #[test]
+    fn turning_cover_art_on_requests_the_loaded_track() {
+        let id = "dQw4w9WgXcQ";
+        let mut a = art_app(false);
+        a.set_thumbnails(true); // nothing loaded
+        assert!(a.settings.thumbnails && a.art_tried.is_empty());
+        a.set_thumbnails(false);
+        a.queue.set(
+            vec![Track {
+                title: "t".into(),
+                channel: String::new(),
+                id: id.into(),
+            }],
+            0,
+        );
+        a.player.now_playing = Some("t".into());
+        a.set_thumbnails(true);
+        assert!(a.art_tried.contains(id));
+        a.set_thumbnails(false);
+        assert!(!a.settings.thumbnails);
+    }
+
+    #[test]
+    fn art_replies_are_cached_oldest_first_and_capped() {
+        let mut a = app();
+        let send = |a: &mut App, id: &str, src| {
+            a.tx.send(Msg::Art(id.into(), src)).unwrap();
+            a.tick();
+        };
+        for i in 0..9 {
+            send(&mut a, &i.to_string(), Some(cover())); // none is the current track
+        }
+        let ids = |a: &App| a.art.iter().map(|(i, _)| i.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&a), ["1", "2", "3", "4", "5", "6", "7", "8"]);
+        send(&mut a, "1", Some(cover())); // re-insert moves to the back
+        assert_eq!(ids(&a).last().map(String::as_str), Some("1"));
+        assert_eq!(a.art.len(), 8);
+        a.status = "keep".into();
+        a.busy = true;
+        send(&mut a, "new", None);
+        assert!(a.art.iter().all(|(i, _)| i != "new"));
+        assert!(a.status == "keep" && a.busy);
     }
 }

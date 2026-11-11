@@ -367,6 +367,108 @@ mod tests {
         a
     }
 
+    /// A playing app with cover art on and, if `cached`, the current track's cover in the cache.
+    fn with_cover(cached: bool) -> App {
+        let mut a = playing();
+        a.settings.thumbnails = true;
+        if cached {
+            let src = image::RgbImage::from_fn(40, 40, |x, y| {
+                image::Rgb([(x * 6) as u8, (y * 6) as u8, 128])
+            });
+            a.art.push((a.results[0].id.clone(), src));
+        }
+        a
+    }
+
+    /// Cells of the 10 x 5 art slot at 80x24 (the row of the label's first line, 11 columns
+    /// left of its text), row by row.
+    fn slot(a: &mut App) -> Vec<Vec<ratatui::buffer::Cell>> {
+        let b = buffer(a, 80, 24);
+        let r = rows(a, 80, 24);
+        let y0 = r.iter().position(|l| l.contains("A ──")).unwrap();
+        let x0 = r[y0]
+            .find("A ──")
+            .map(|i| r[y0][..i].chars().count())
+            .unwrap()
+            - ART_W
+            - 1;
+        (y0..y0 + 5)
+            .map(|y| {
+                (x0..x0 + ART_W)
+                    .map(|x| b[(x as u16, y as u16)].clone())
+                    .collect()
+            })
+            .collect()
+    }
+
+    const ART_W: usize = 10;
+
+    #[test]
+    fn cover_is_drawn_in_the_shells_inks() {
+        let mut a = with_cover(true);
+        let cells = slot(&mut a);
+        let palette = crate::art::shell_palette(a.shell());
+        for c in cells.iter().flatten() {
+            assert_eq!(c.symbol(), "▀");
+            assert!(palette.contains(&c.fg) && palette.contains(&c.bg));
+        }
+        // Not just the two paper tones: the gradient picks other inks too.
+        let colors: std::collections::HashSet<_> =
+            cells.iter().flatten().flat_map(|c| [c.fg, c.bg]).collect();
+        assert!(colors.len() > 2);
+    }
+
+    #[test]
+    fn placeholder_until_the_cover_is_cached() {
+        let mut a = with_cover(false);
+        let s = a.shell();
+        let paper = crate::art::shell_palette(s); // label and its darker paper
+        let cells = slot(&mut a);
+        let tones: std::collections::HashSet<_> =
+            cells.iter().flatten().flat_map(|c| [c.fg, c.bg]).collect();
+        assert_eq!(tones.len(), 2);
+        assert!(tones.contains(&s.label) && !paper.iter().all(|c| tones.contains(c)));
+        assert!(cells.iter().flatten().all(|c| c.symbol() == "▀"));
+    }
+
+    #[test]
+    fn cover_setting_off_draws_the_plain_label() {
+        let mut off = with_cover(true);
+        off.settings.thumbnails = false;
+        let mut plain = playing();
+        let r = rows(&mut off, 80, 24);
+        assert_eq!(r, rows(&mut plain, 80, 24));
+        assert!(r.iter().any(|l| l.contains("│ │ A ──")));
+        assert!(r.iter().all(|l| !l.contains("▀▀▀▀")));
+    }
+
+    #[test]
+    fn cover_hides_in_eject_and_insert_and_shows_when_seated() {
+        for (ms, shown) in [(80, false), (280, false), (500, true)] {
+            let mut a = with_cover(true);
+            let at = a.anim.now - std::time::Duration::from_millis(ms);
+            a.anim.swap = Some((at, "Take On Me".into(), "a-ha".into()));
+            let b = buffer(&mut a, 80, 24);
+            let r = rows(&mut a, 80, 24);
+            let y0 = r.iter().position(|l| l.contains("╭──────")).unwrap();
+            let blocks = (y0..y0 + 8)
+                .flat_map(|y| (4..14).map(move |x| (x, y)))
+                .filter(|&(x, y)| b[(x as u16, y as u16)].symbol() == "▀")
+                .count();
+            assert_eq!(blocks > 0, shown, "{ms} ms");
+        }
+    }
+
+    #[test]
+    fn changing_shell_recolors_the_cover() {
+        let mut a = with_cover(true);
+        let look =
+            |a: &mut App| -> Vec<_> { slot(a).iter().flatten().map(|c| (c.fg, c.bg)).collect() };
+        let first = look(&mut a);
+        a.settings.shell = SHELLS[1].id.into();
+        assert_ne!(first, look(&mut a));
+    }
+
     #[test]
     fn tiers_by_size() {
         assert_eq!(tier(80, 24), Tier::Deck);
@@ -929,6 +1031,11 @@ mod tests {
             let mut a = playing();
             a.searching = true;
             show("Deck, search focused", &mut a, w, h);
+        }
+        for (name, cached) in [("cover shown", true), ("cover placeholder", false)] {
+            let mut a = with_cover(cached);
+            a.status.clear();
+            show(&format!("Deck, {name}"), &mut a, 80, 24);
         }
         let mut a = playing();
         a.status.clear();

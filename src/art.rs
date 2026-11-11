@@ -1,7 +1,5 @@
 //! Cover art as pixel art: decode a thumbnail to a tiny source, then reduce it to an
 //! n x n grid of the active shell's own colors with ordered dithering.
-// Wired into the deck in milestone 3 step B.
-#![allow(dead_code)]
 
 use image::{DynamicImage, RgbImage, imageops::FilterType};
 use ratatui::style::Color;
@@ -36,6 +34,40 @@ fn center_square(img: &DynamicImage, size: u32) -> RgbImage {
 pub fn decode(bytes: &[u8]) -> Option<Source> {
     let img = image::load_from_memory(bytes).ok()?;
     Some(center_square(&img, SOURCE_SIZE))
+}
+
+/// A YouTube video id: exactly 11 characters of `[A-Za-z0-9_-]`.
+pub fn valid_id(id: &str) -> bool {
+    id.len() == 11
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Download the track's thumbnail and decode it; `None` on any failure (art is optional, so
+/// errors stay silent). The caller validates `id`.
+pub async fn fetch(id: &str) -> Option<Source> {
+    const MAX: u64 = 1 << 20;
+    let resp = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?
+        .get(format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    if resp.content_length().is_some_and(|n| n > MAX) {
+        return None;
+    }
+    let bytes = resp.bytes().await.ok()?;
+    if bytes.len() as u64 > MAX {
+        return None;
+    }
+    tokio::task::spawn_blocking(move || decode(&bytes))
+        .await
+        .ok()?
 }
 
 /// The shell's inks, duplicates removed, order kept.
@@ -110,7 +142,8 @@ fn stretch(img: &mut RgbImage, inks: &[(Color, [i32; 3])]) {
     }
     let k = (phi - plo) / (hi - lo);
     for p in img.pixels_mut() {
-        p.0 = p.0.map(|v| (plo + (v as f32 - lo) * k).clamp(0.0, 255.0) as u8);
+        p.0 =
+            p.0.map(|v| (plo + (v as f32 - lo) * k).clamp(0.0, 255.0) as u8);
     }
 }
 
@@ -197,6 +230,17 @@ mod tests {
     fn one_pixel_image_decodes() {
         let src = decode(&jpeg(&RgbImage::from_pixel(1, 1, Rgb([200, 0, 0])))).unwrap();
         assert_eq!(src.dimensions(), (40, 40));
+    }
+
+    #[test]
+    fn valid_id_is_eleven_url_safe_characters() {
+        assert!(valid_id("dQw4w9WgXcQ"));
+        assert!(valid_id("a-_Z0-_9aaa"));
+        assert!(!valid_id("dQw4w9WgXc")); // 10
+        assert!(!valid_id("dQw4w9WgXcQQ")); // 12
+        assert!(!valid_id("dQw4w9WgX/Q"));
+        assert!(!valid_id("dQw4w9WgXé"));
+        assert!(!valid_id(""));
     }
 
     #[test]

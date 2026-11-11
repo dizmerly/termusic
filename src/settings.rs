@@ -15,6 +15,8 @@ pub struct Settings {
     pub shell: String,
     /// Moving reels, keys, tape swap and level meters; off draws the deck still.
     pub animations: bool,
+    /// Pixel-art cover of the playing track on the cassette label (fetches its thumbnail).
+    pub thumbnails: bool,
     /// Tape hiss under the music, at `hiss_level` percent of the volume.
     pub hiss: bool,
     pub hiss_level: u8,
@@ -27,6 +29,7 @@ impl Default for Settings {
             history_path: None,
             shell: crate::theme::SHELLS[0].id.into(),
             animations: true,
+            thumbnails: false,
             hiss: false,
             hiss_level: DEFAULT_HISS_LEVEL,
         }
@@ -120,6 +123,7 @@ mod tests {
             history_path: Some("/h.json".into()),
             shell: "amber".into(),
             animations: false,
+            thumbnails: true,
             hiss: true,
             hiss_level: 45,
         }
@@ -128,7 +132,7 @@ mod tests {
         let got = Settings::load_from(&p);
         assert_eq!((got.volume, got.history_path), (33, Some("/h.json".into())));
         assert_eq!(got.shell, "amber");
-        assert!(!got.animations);
+        assert!(!got.animations && got.thumbnails);
         assert_eq!((got.hiss, got.hiss_level), (true, 45));
         std::fs::write(&p, "{not json").unwrap();
         assert_eq!(Settings::load_from(&p), Settings::default()); // corrupt

@@ -3,13 +3,14 @@
 use super::{clean, fit, pad, wrap};
 use crate::anim::{Key, Phase, SEGMENTS};
 use crate::app::{App, Screen};
+use crate::art;
 use crate::commands;
 use crate::queue::Loop;
 use crate::theme::{self, Shell, fg};
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -41,6 +42,8 @@ pub struct CassetteView<'a> {
     pub loaded: bool,
     /// Leave the label's left 10 x 5 cells for the thumbnail.
     pub art: bool,
+    /// The cover as a 10 x 10 grid; without it an `art` slot shows the paper checker.
+    pub cover: Option<&'a art::Grid>,
     /// A tape swap in progress, and the label (title, channel) being ejected.
     pub phase: Option<Phase>,
     pub old: (&'a str, &'a str),
@@ -66,7 +69,6 @@ pub fn cassette(s: &Shell, v: &CassetteView) -> Vec<Line<'static>> {
                 title: v.old.0,
                 channel: v.old.1,
                 loaded: true,
-                phase: None,
                 ..*v
             };
             slide(label(s, &old), k, empty)
@@ -114,6 +116,8 @@ pub fn label(s: &Shell, v: &CassetteView) -> Vec<Line<'static>> {
     } else {
         ("NO TAPE".into(), "press / to search".into(), "")
     };
+    let hidden = !v.loaded || matches!(v.phase, Some(Phase::Eject(_) | Phase::Insert(_)));
+    let paper = mix(s.label, s.label_ink, 0.15);
     let rows = [
         (format!("A {}", "─".repeat(w.saturating_sub(2))), ink),
         (two, ink.add_modifier(Modifier::BOLD)),
@@ -122,14 +126,38 @@ pub fn label(s: &Shell, v: &CassetteView) -> Vec<Line<'static>> {
         (format!("{} C90", "─".repeat(w.saturating_sub(4))), ink),
     ];
     rows.into_iter()
-        .map(|(text, style)| {
-            Line::from(vec![
-                Span::styled(" ".repeat(left), ink),
-                Span::styled(pad(&text, w), style),
-                Span::styled(" ", ink),
-            ])
+        .enumerate()
+        .map(|(r, (text, style))| {
+            let mut spans = if !v.art || hidden {
+                vec![Span::styled(" ".repeat(left), ink)]
+            } else {
+                // Half-blocks: upper pixel is the foreground, lower the background.
+                let px = |x: usize, y: usize| match v.cover {
+                    Some(g) => g[y][x],
+                    None if (x + y).is_multiple_of(2) => s.label,
+                    None => paper,
+                };
+                let mut cells: Vec<_> = (0..ART_W)
+                    .map(|x| Span::styled("▀", Style::new().fg(px(x, 2 * r)).bg(px(x, 2 * r + 1))))
+                    .collect();
+                cells.push(Span::styled(" ", ink));
+                cells
+            };
+            spans.extend([Span::styled(pad(&text, w), style), Span::styled(" ", ink)]);
+            Line::from(spans)
         })
         .collect()
+}
+
+/// `a` moved `t` (0..1) of the way toward `b`; non-RGB colors stay as they are.
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+            let m = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+            Color::Rgb(m(ar, br), m(ag, bg), m(ab, bb))
+        }
+        _ => a,
+    }
 }
 
 /// Label rows moved up by `offset`: row `i` shows `rows[i + offset]`, or `empty` past the end.
@@ -334,6 +362,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
         .map_or("", |t| t.channel.as_str());
     let anim = app.settings.animations.then_some(&app.anim);
     let swap = anim.and_then(|a| a.swap.as_ref());
+    let cur = app.queue.current().filter(|t| t.title == title);
+    let loaded = p.now_playing.is_some();
+    let thumbs = app.settings.thumbnails && loaded;
+    // Pixelized per frame (40x40 -> 10x10 is cheap) so a shell change recolors the cached source.
+    let grid = cur
+        .filter(|_| thumbs)
+        .and_then(|t| app.art.iter().find(|(id, _)| *id == t.id))
+        .map(|(_, src)| art::pixelize(src, 10, &art::shell_palette(s)));
     let v = CassetteView {
         title,
         channel,
@@ -344,8 +380,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
             (None, true) => p.position as usize,
             (None, false) => 0,
         },
-        loaded: p.now_playing.is_some(),
-        art: false,
+        loaded,
+        art: thumbs,
+        cover: grid.as_ref(),
         phase: anim.and_then(|a| a.phase()),
         old: swap.map_or(("", ""), |(_, t, c)| (t.as_str(), c.as_str())),
     };
@@ -424,6 +461,7 @@ mod tests {
             spin: 0,
             loaded,
             art,
+            cover: None,
             phase: None,
             old: ("", ""),
         }
@@ -445,6 +483,7 @@ mod tests {
             "Supercalifragilisticexpialidocious_and_then_some_more",
             &long,
         ] {
+            let grid = vec![vec![Color::Rgb(1, 2, 3); 10]; 10];
             for (loaded, art) in [(true, false), (true, true), (false, false), (false, true)] {
                 for p in [
                     None,
@@ -455,10 +494,14 @@ mod tests {
                     Some(f64::NAN),
                 ] {
                     for s in SHELLS {
-                        let lines = cassette(s, &view(title, p, loaded, art));
-                        assert_eq!(lines.len(), 12);
-                        for l in &lines {
-                            assert_eq!(l.width(), CASSETTE_W, "{title:?} {art} {:?}", text(l));
+                        for cover in [None, Some(&grid)] {
+                            let mut v = view(title, p, loaded, art);
+                            v.cover = cover;
+                            let lines = cassette(s, &v);
+                            assert_eq!(lines.len(), 12);
+                            for l in &lines {
+                                assert_eq!(l.width(), CASSETTE_W, "{title:?} {art} {:?}", text(l));
+                            }
                         }
                     }
                 }
@@ -515,7 +558,8 @@ mod tests {
         let l: Vec<String> = label(&TPS_L2, &v).iter().map(text).collect();
         for r in &l {
             assert_eq!(r.width(), LABEL_W);
-            assert_eq!(&r[..ART_W + 1], " ".repeat(ART_W + 1)); // art + margin are blank
+            assert_eq!(r.chars().take(ART_W).collect::<String>(), "▀".repeat(ART_W));
+            assert_eq!(r.chars().nth(ART_W), Some(' ')); // margin
         }
         // 0-based column 11 is the first text column.
         assert_eq!(l[0].chars().nth(11), Some('A'));
@@ -525,6 +569,46 @@ mod tests {
             .map(text)
             .collect();
         assert_eq!(plain[1].chars().nth(1), Some('T'));
+    }
+
+    #[test]
+    fn mix_moves_toward_the_second_color() {
+        let (a, b) = (Color::Rgb(0, 100, 200), Color::Rgb(100, 0, 200));
+        assert_eq!(mix(a, b, 0.0), a);
+        assert_eq!(mix(a, b, 0.15), Color::Rgb(15, 85, 200));
+        assert_eq!(mix(Color::Reset, b, 0.5), Color::Reset);
+    }
+
+    #[test]
+    fn art_slot_hides_in_eject_and_insert_only() {
+        let s = &TPS_L2;
+        let grid = vec![vec![Color::Rgb(9, 9, 9); 10]; 10];
+        let mut v = view("Take On Me", Some(0.1), true, true);
+        v.cover = Some(&grid);
+        let slot = |v: &CassetteView| label(s, v)[0].spans[0].content.to_string();
+        for ph in [None, Some(Phase::Seat)] {
+            v.phase = ph;
+            assert_eq!(slot(&v), "▀");
+            assert_eq!(label(s, &v)[0].spans[0].style.fg, Some(Color::Rgb(9, 9, 9)));
+        }
+        for ph in [Phase::Eject(1), Phase::Insert(1)] {
+            v.phase = Some(ph);
+            assert_eq!(label(s, &v)[0].spans[0].content, " ".repeat(ART_W + 1));
+            assert_eq!(label(s, &v)[0].spans[0].style.bg, Some(s.label));
+        }
+    }
+
+    #[test]
+    fn placeholder_is_a_two_tone_paper_checker() {
+        let s = &TPS_L2;
+        let paper = mix(s.label, s.label_ink, 0.15);
+        let v = view("Take On Me", None, true, true);
+        for l in label(s, &v) {
+            for sp in &l.spans[..ART_W] {
+                let (f, b) = (sp.style.fg.unwrap(), sp.style.bg.unwrap());
+                assert!([f, b].iter().all(|c| *c == s.label || *c == paper));
+            }
+        }
     }
 
     #[test]

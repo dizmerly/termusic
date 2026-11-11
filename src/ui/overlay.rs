@@ -172,6 +172,14 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
         ),
         row(Row::Shell, "Shell", format!("{}  ←/→", app.shell().name)),
         row(
+            Row::CoverArt,
+            "Cover art",
+            format!(
+                "{}  Enter ←/→",
+                if app.settings.thumbnails { "on" } else { "off" }
+            ),
+        ),
+        row(
             Row::Animations,
             "Animations",
             format!(
