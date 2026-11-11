@@ -1,6 +1,6 @@
 # termusic
 
-A text-only terminal YouTube Music player written in Rust with [Ratatui](https://ratatui.rs). Sign in with Google, search YouTube, browse your playlists and play audio, all from the keyboard.
+A terminal YouTube Music player written in Rust with [Ratatui](https://ratatui.rs). Sign in with Google, search YouTube, browse your playlists and play audio, all from the keyboard.
 
 ## Quickstart
 
@@ -40,7 +40,7 @@ The list pane has four tabs (`Tab`/`Shift-Tab` or `1`-`4`); each keeps its own s
 | Screen | What it does |
 |--------|--------------|
 | Search field | At the top of every tab (`/`). `Enter` runs the query (via `yt-dlp`, no account needed) and shows the top 30 results on the Results tab. `Esc` or `Tab` leaves the field and keeps the text; it never quits. |
-| Results (`1`) | Scrollable list of tracks (title and channel). Text only, no thumbnails. Follows the playing track. |
+| Results (`1`) | Scrollable list of tracks (title and channel). Text only; thumbnails never appear in lists. Follows the playing track. |
 | Queue (`2`) | The playing track, then what plays next. `Enter` jumps to the highlighted track; the ones before it count as played (`b` goes back through them). |
 | Lists (`3`, `P`) | Your YouTube playlists. `Enter` loads the playlist (first 50 tracks) as the queue, in order, and plays the first track; the Results tab then shows it. Signed out, the tab shows a sign-in prompt instead: `Enter` opens your browser and shows the URL while waiting. |
 | History (`4`, `H`) | The last 10 played tracks. `Enter` replays from there, resuming where you stopped, and the queue follows history order. |
@@ -91,6 +91,10 @@ The list pane has four tabs (`Tab`/`Shift-Tab` or `1`-`4`); each keeps its own s
 ### Settings
 
 The volume is saved to `settings.json` in the config dir (same dir as `tokens.json`) and restored at startup (default 70). Set `TERMUSIC_CONFIG_DIR` to use another directory for settings and tokens.
+
+### Cover art
+
+The **Cover art** setting (Settings screen, off by default) shows the playing track's thumbnail as pixel art on the cassette label, drawn in the active shell's colors. The image-protocol query only runs in terminals known to support images (kitty, Ghostty, WezTerm, iTerm2, detected from `TERM_PROGRAM`, `TERM` or `KITTY_WINDOW_ID`), because the query library leaves a thread reading the keyboard if a terminal never answers. Those terminals get a crisp, hard-edged image (WezTerm through the iTerm2 protocol: the image crate blacklists its kitty and sixel paths). All other terminals get half-block pixels, and switching the setting on says so once per session. Set `TERMUSIC_ART=detect` to force the query anyway (for example in a sixel terminal the hints miss). Set `TERMUSIC_ART=halfblocks` to force half-blocks (for a terminal that misreports) or `TERMUSIC_ART=off` to never draw or fetch art; either skips the startup terminal query.
 
 ### CLI
 ```sh

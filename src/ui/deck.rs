@@ -14,6 +14,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
+use ratatui_image::Image;
 use unicode_width::UnicodeWidthStr;
 
 /// Width of the deck pane.
@@ -42,6 +43,8 @@ pub struct CassetteView<'a> {
     pub loaded: bool,
     /// Leave the label's left 10 x 5 cells for the thumbnail.
     pub art: bool,
+    /// An image protocol draws the cover over the slot: leave it plain paper.
+    pub crisp: bool,
     /// The cover as a 10 x 10 grid; without it an `art` slot shows the paper checker.
     pub cover: Option<&'a art::Grid>,
     /// A tape swap in progress, and the label (title, channel) being ejected.
@@ -128,7 +131,7 @@ pub fn label(s: &Shell, v: &CassetteView) -> Vec<Line<'static>> {
     rows.into_iter()
         .enumerate()
         .map(|(r, (text, style))| {
-            let mut spans = if !v.art || hidden {
+            let mut spans = if !v.art || hidden || v.crisp {
                 vec![Span::styled(" ".repeat(left), ink)]
             } else {
                 // Half-blocks: upper pixel is the foreground, lower the background.
@@ -349,6 +352,19 @@ pub fn key_caps(
     rows.into_iter().map(Line::from).collect()
 }
 
+/// Where the 10 x 5 cover slot lands, given the area the centered stack is drawn in.
+fn slot_rect(stack: Rect) -> Option<Rect> {
+    let w = CASSETTE_W as u16;
+    (stack.width >= w && stack.height >= LABEL_H as u16 + 2).then(|| {
+        Rect::new(
+            stack.x + (stack.width - w) / 2 + 3,
+            stack.y + 2,
+            ART_W as u16,
+            LABEL_H as u16,
+        )
+    })
+}
+
 /// The deck pane. Deck tier: the stack centered vertically with the status row pinned to the
 /// bottom. Pocket tier: the stack at the top with the status row under it.
 pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
@@ -364,7 +380,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
     let swap = anim.and_then(|a| a.swap.as_ref());
     let cur = app.queue.current().filter(|t| t.title == title);
     let loaded = p.now_playing.is_some();
-    let thumbs = app.settings.thumbnails && loaded;
+    let thumbs = app.settings.thumbnails && loaded && app.art_path != art::ArtPath::Off;
+    let crisp = app
+        .cover_key()
+        .and_then(|k| app.cover_proto.as_ref().filter(|(ck, _)| *ck == k))
+        .and_then(|(_, p)| p.as_ref());
     // Pixelized per frame (40x40 -> 10x10 is cheap) so a shell change recolors the cached source.
     let grid = cur
         .filter(|_| thumbs)
@@ -382,6 +402,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
         },
         loaded,
         art: thumbs,
+        crisp: crisp.is_some(),
         cover: grid.as_ref(),
         phase: anim.and_then(|a| a.phase()),
         old: swap.map_or(("", ""), |(_, t, c)| (t.as_str(), c.as_str())),
@@ -418,6 +439,10 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, pocket: bool) {
         stack_h.min(area.height.saturating_sub(top)),
     );
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), stack);
+    // Not while a tape swaps: the slot slides as paper.
+    if let (Some(p), None | Some(Phase::Seat), Some(r)) = (crisp, v.phase, slot_rect(stack)) {
+        f.render_widget(Image::new(p), r);
+    }
 
     let mut status = Vec::new();
     if app.busy {
@@ -461,6 +486,7 @@ mod tests {
             spin: 0,
             loaded,
             art,
+            crisp: false,
             cover: None,
             phase: None,
             old: ("", ""),
@@ -839,5 +865,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Draws the deck pane with a flat accent-colored cover cached; returns the buffer, the
+    /// accent and the slot. `crisp`: `Some(built)` caches a protocol (or its failure marker).
+    fn render_cover(
+        path: art::ArtPath,
+        crisp: Option<bool>,
+    ) -> (ratatui::buffer::Buffer, Color, Rect) {
+        use crate::app::App;
+        use ratatui::{Terminal, backend::TestBackend};
+        use ratatui_image::picker::Picker;
+        let mut a = App::blank();
+        a.settings.thumbnails = true;
+        a.art_path = path;
+        a.picker = Some(Picker::halfblocks());
+        a.player.now_playing = Some("t".into());
+        a.queue.set(
+            vec![crate::youtube::Track {
+                title: "t".into(),
+                channel: String::new(),
+                id: "dQw4w9WgXcQ".into(),
+            }],
+            0,
+        );
+        let accent = a.shell().accent;
+        let Color::Rgb(ar, ag, ab) = accent else {
+            panic!("accent must be rgb")
+        };
+        let src = art::Source::from_pixel(40, 40, image::Rgb([ar, ag, ab]));
+        if let Some(built) = crisp {
+            let proto = art::protocol(a.picker.as_ref().unwrap(), &src, a.shell());
+            a.cover_proto = Some((a.cover_key().unwrap(), proto.filter(|_| built)));
+        }
+        a.art.push(("dQw4w9WgXcQ".into(), src));
+        let area = Rect::new(0, 0, PANE_W, 24);
+        let mut t = Terminal::new(TestBackend::new(PANE_W, 24)).unwrap();
+        t.draw(|f| draw(f, &a, area, false)).unwrap();
+        let top = area.height.saturating_sub(STACK_H + 1) / 2;
+        let slot = slot_rect(Rect::new(0, top, PANE_W, 24)).unwrap();
+        (t.backend().buffer().clone(), accent, slot)
+    }
+
+    #[test]
+    fn crisp_image_lands_on_the_label_slot() {
+        let (buf, accent, slot) = render_cover(art::ArtPath::Crisp, Some(true));
+        let cell = |x, y| &buf[(x, y)];
+        // The protocol's cells, not ours (we always draw "▀"), cover exactly the slot.
+        assert!((0..5).all(|dy| (0..10).all(|dx| {
+            let c = cell(slot.x + dx, slot.y + dy);
+            c.bg == accent && c.symbol() != "▀"
+        })));
+        assert_ne!(cell(slot.x - 1, slot.y).bg, accent);
+        assert_ne!(cell(slot.x + 10, slot.y + 1).bg, accent);
+        assert_ne!(cell(slot.x, slot.y + 5).bg, accent);
+        assert_ne!(cell(slot.x, slot.y - 1).bg, accent);
+        assert_eq!(slot_rect(Rect::new(0, 0, 20, 24)), None);
+    }
+
+    #[test]
+    fn failed_protocol_falls_back_to_half_blocks_and_off_draws_nothing() {
+        // The failure marker (hook-free: the cache stores `None` for the key).
+        let (buf, accent, slot) = render_cover(art::ArtPath::Crisp, Some(false));
+        assert!((0..5).all(|dy| (0..10).all(|dx| {
+            let c = &buf[(slot.x + dx, slot.y + dy)];
+            c.symbol() == "▀" && c.fg == accent && c.bg == accent
+        })));
+        let (buf, accent, slot) = render_cover(art::ArtPath::Off, None);
+        assert!((0..5).all(|dy| (0..10).all(|dx| {
+            let c = &buf[(slot.x + dx, slot.y + dy)];
+            c.symbol() != "▀" && c.bg != accent
+        })));
     }
 }

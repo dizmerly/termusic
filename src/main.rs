@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
 fn run_tui() -> Result<()> {
     let mut terminal = ratatui::init();
     let mut app = app::App::new();
+    (app.art_path, app.picker) = art::detect();
     let res = (|| -> Result<()> {
         while !app.quit {
             app.tick();

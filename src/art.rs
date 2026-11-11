@@ -1,8 +1,15 @@
 //! Cover art as pixel art: decode a thumbnail to a tiny source, then reduce it to an
 //! n x n grid of the active shell's own colors with ordered dithering.
 
+use std::time::Duration;
+
 use image::{DynamicImage, RgbImage, imageops::FilterType};
-use ratatui::style::Color;
+use ratatui::{layout::Size, style::Color};
+use ratatui_image::{
+    Resize,
+    picker::{Picker, ProtocolType, cap_parser::QueryStdioOptions},
+    protocol::Protocol,
+};
 
 use crate::theme;
 
@@ -34,6 +41,92 @@ fn center_square(img: &DynamicImage, size: u32) -> RgbImage {
 pub fn decode(bytes: &[u8]) -> Option<Source> {
     let img = image::load_from_memory(bytes).ok()?;
     Some(center_square(&img, SOURCE_SIZE))
+}
+
+/// How the cover is drawn this session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArtPath {
+    /// A terminal image protocol (kitty, sixel, iTerm2).
+    Crisp,
+    HalfBlocks,
+    /// No art at all, whatever the setting says.
+    Off,
+}
+
+/// `env` is `TERMUSIC_ART`, `query` what the terminal reported (`None`: it failed).
+pub fn choose(env: Option<&str>, query: Option<ProtocolType>) -> ArtPath {
+    match (env, query) {
+        (Some("off"), _) => ArtPath::Off,
+        (Some("halfblocks"), _) => ArtPath::HalfBlocks,
+        (_, Some(ProtocolType::Kitty | ProtocolType::Sixel | ProtocolType::Iterm2)) => {
+            ArtPath::Crisp
+        }
+        _ => ArtPath::HalfBlocks,
+    }
+}
+
+/// Whether to run the terminal query: forced by `TERMUSIC_ART=detect`, else only when the
+/// environment hints at an image-capable terminal (`off` and `halfblocks` never query).
+pub fn should_query(
+    env_art: Option<&str>,
+    term_program: Option<&str>,
+    term: Option<&str>,
+    kitty_window_id: Option<&str>,
+) -> bool {
+    match env_art {
+        Some("off" | "halfblocks") => return false,
+        Some("detect") => return true,
+        _ => {}
+    }
+    let known = ["ghostty", "iterm.app", "wezterm", "kitty"];
+    term_program.is_some_and(|t| known.iter().any(|k| t.eq_ignore_ascii_case(k)))
+        || term.is_some_and(|t| t.contains("kitty") || t.contains("ghostty"))
+        || kitty_window_id.is_some_and(|k| !k.is_empty())
+}
+
+/// Decide the path once at startup (raw mode on); the picker is kept only for `Crisp`.
+/// The query runs only where `should_query` says so; a silent terminal costs at most 250 ms.
+pub fn detect() -> (ArtPath, Option<Picker>) {
+    let var = |k| std::env::var(k).ok();
+    let env = var("TERMUSIC_ART");
+    let (tp, term, kw) = (var("TERM_PROGRAM"), var("TERM"), var("KITTY_WINDOW_ID"));
+    if !should_query(
+        env.as_deref(),
+        tp.as_deref(),
+        term.as_deref(),
+        kw.as_deref(),
+    ) {
+        return (choose(env.as_deref(), None), None);
+    }
+    // The crate's stdin-reading query thread outlives its timeout and would eat every keystroke
+    // if the terminal never answers, hence the hint check above.
+    let picker = Picker::from_query_stdio_with_options(QueryStdioOptions {
+        timeout: Duration::from_millis(250),
+        ..Default::default()
+    })
+    .ok();
+    let path = choose(env.as_deref(), picker.as_ref().map(Picker::protocol_type));
+    (path, picker.filter(|_| path == ArtPath::Crisp))
+}
+
+/// The grid as hard-edged pixels: every grid cell becomes a solid block.
+pub fn upscale(grid: &Grid, w: u32, h: u32) -> RgbImage {
+    let n = grid.len() as u32;
+    let small = RgbImage::from_fn(n, n, |x, y| match grid[y as usize][x as usize] {
+        Color::Rgb(r, g, b) => image::Rgb([r, g, b]),
+        _ => image::Rgb([0, 0, 0]),
+    });
+    image::imageops::resize(&small, w, h, FilterType::Nearest)
+}
+
+/// The protocol image for the 10 x 5 cell label slot; `None` when the crate cannot build it.
+pub fn protocol(picker: &Picker, src: &Source, shell: &theme::Shell) -> Option<Protocol> {
+    let grid = pixelize(src, 20, &shell_palette(shell));
+    let font = picker.font_size();
+    let img = upscale(&grid, 10 * font.width as u32, 5 * font.height as u32);
+    picker
+        .new_protocol(img.into(), Size::new(10, 5), Resize::Fit(None))
+        .ok()
 }
 
 /// A YouTube video id: exactly 11 characters of `[A-Za-z0-9_-]`.
@@ -208,6 +301,71 @@ mod tests {
         // Spread 0: JPEG noise cannot flip a nearest-color choice into a flaky exact assertion.
         let grid = pixelize_with(&src, 10, &[RED, GREEN, BLUE], 0.0);
         assert!(grid.iter().flatten().all(|&c| c == GREEN));
+    }
+
+    #[test]
+    fn choose_covers_every_row() {
+        use ProtocolType::*;
+        let rows = [
+            (Some("off"), Some(Kitty), ArtPath::Off),
+            (Some("off"), None, ArtPath::Off),
+            (Some("halfblocks"), Some(Kitty), ArtPath::HalfBlocks),
+            (Some("halfblocks"), None, ArtPath::HalfBlocks),
+            (Some("bogus"), Some(Sixel), ArtPath::Crisp), // unknown value: as unset
+            (Some("bogus"), None, ArtPath::HalfBlocks),
+            (None, Some(Kitty), ArtPath::Crisp),
+            (None, Some(Sixel), ArtPath::Crisp),
+            (None, Some(Iterm2), ArtPath::Crisp),
+            (None, Some(Halfblocks), ArtPath::HalfBlocks),
+            (None, None, ArtPath::HalfBlocks),
+        ];
+        for (env, q, want) in rows {
+            assert_eq!(choose(env, q), want, "{env:?} {q:?}");
+        }
+    }
+
+    #[test]
+    fn should_query_only_for_hinted_terminals() {
+        for tp in ["ghostty", "iTerm.app", "WezTerm", "kitty", "GHOSTTY"] {
+            assert!(should_query(None, Some(tp), None, None), "{tp}");
+        }
+        for tp in [Some("Apple_Terminal"), Some("rex"), None] {
+            assert!(
+                !should_query(None, tp, Some("xterm-256color"), None),
+                "{tp:?}"
+            );
+        }
+        assert!(should_query(None, None, Some("xterm-kitty"), None));
+        assert!(should_query(None, None, Some("xterm-ghostty"), None));
+        assert!(should_query(None, None, None, Some("7")));
+        assert!(!should_query(None, None, None, Some("")));
+        assert!(should_query(Some("detect"), Some("rex"), None, None));
+        assert!(should_query(Some("bogus"), Some("kitty"), None, None));
+        assert!(!should_query(Some("bogus"), Some("rex"), None, None));
+        for v in ["off", "halfblocks"] {
+            assert!(!should_query(
+                Some(v),
+                Some("kitty"),
+                Some("xterm-kitty"),
+                Some("7")
+            ));
+        }
+    }
+
+    #[test]
+    fn upscale_gives_solid_blocks() {
+        let grid: Grid = (0..4)
+            .map(|y| {
+                (0..4)
+                    .map(|x| Color::Rgb((x * 60) as u8, (y * 60) as u8, 7))
+                    .collect()
+            })
+            .collect();
+        let img = upscale(&grid, 40, 20); // 10 x 5 pixels per grid cell
+        assert_eq!(img.dimensions(), (40, 20));
+        for (x, y, p) in img.enumerate_pixels() {
+            assert_eq!(p.0, [(x / 10 * 60) as u8, (y / 5 * 60) as u8, 7], "{x},{y}");
+        }
     }
 
     #[test]

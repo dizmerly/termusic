@@ -10,6 +10,7 @@ use crate::theme::{self, Shell};
 use crate::youtube::{self, Track};
 use crate::{art, auth, net};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui_image::{picker::Picker, protocol::Protocol};
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
@@ -171,7 +172,23 @@ pub struct App {
     pub art: Vec<(String, art::Source)>,
     /// Ids whose cover was requested this session (done, failed or in flight): never again.
     art_tried: HashSet<String>,
+    /// How covers are drawn this session (decided once at startup).
+    pub art_path: art::ArtPath,
+    /// The terminal's image picker; kept only for `ArtPath::Crisp`.
+    pub picker: Option<Picker>,
+    /// The built image protocol for the current cover key; `None` inside: it failed, use half-blocks.
+    pub cover_proto: Option<(CoverKey, Option<Protocol>)>,
+    /// The half-block / off notice was already shown this session.
+    art_noted: bool,
+    /// Test hooks: count protocol builds, force one to fail.
+    #[cfg(test)]
+    cover_builds: usize,
+    #[cfg(test)]
+    fail_cover: bool,
 }
+
+/// What a built cover protocol depends on: track id, shell id, cell pixel size.
+pub type CoverKey = (String, &'static str, (u16, u16));
 
 impl App {
     pub fn new() -> Self {
@@ -219,6 +236,14 @@ impl App {
             anim: Anim::new(Instant::now()),
             art: Vec::new(),
             art_tried: HashSet::new(),
+            art_path: art::ArtPath::HalfBlocks,
+            picker: None,
+            cover_proto: None,
+            art_noted: false,
+            #[cfg(test)]
+            cover_builds: 0,
+            #[cfg(test)]
+            fail_cover: false,
             playlists: Vec::new(),
             from_playlist: false,
             #[cfg(test)]
@@ -266,6 +291,19 @@ impl App {
     /// Cover art on or off and save the choice; turning it on fetches the loaded track's.
     pub fn set_thumbnails(&mut self, on: bool) {
         self.settings.thumbnails = on;
+        if on && !self.art_noted {
+            let note = match self.art_path {
+                art::ArtPath::Crisp => None,
+                art::ArtPath::HalfBlocks => {
+                    Some("cover art: half-block mode (no image protocol here)")
+                }
+                art::ArtPath::Off => Some("cover art: off (TERMUSIC_ART=off)"),
+            };
+            if let Some(n) = note {
+                self.status = n.into();
+                self.art_noted = true;
+            }
+        }
         let id = self
             .player
             .now_playing
@@ -280,6 +318,7 @@ impl App {
     /// Fetch a track's cover once per session. Failures stay silent: no status, no Offline.
     fn request_art(&mut self, id: &str) {
         if !self.settings.thumbnails
+            || self.art_path == art::ArtPath::Off
             || self.screen == Screen::Offline
             || !art::valid_id(id)
             || !self.art_tried.insert(id.to_owned())
@@ -294,6 +333,38 @@ impl App {
             let src = art::fetch(&id).await;
             let _ = tx.send(Msg::Art(id, src));
         });
+    }
+
+    /// The cover protocol's cache key for the playing track; `None` unless the crisp path applies.
+    pub fn cover_key(&self) -> Option<CoverKey> {
+        let font = self.picker.as_ref()?.font_size();
+        let title = self.player.now_playing.as_deref()?;
+        let t = self.queue.current().filter(|t| t.title == title)?;
+        let on = self.settings.thumbnails && self.art_path == art::ArtPath::Crisp;
+        on.then(|| (t.id.clone(), self.shell().id, (font.width, font.height)))
+    }
+
+    /// Build the cover protocol when the key changed and the source is cached.
+    fn sync_cover(&mut self) {
+        let Some(key) = self.cover_key() else { return };
+        if self.cover_proto.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        let (Some((_, src)), Some(picker)) =
+            (self.art.iter().find(|(id, _)| *id == key.0), &self.picker)
+        else {
+            return;
+        };
+        #[allow(unused_mut)]
+        let mut proto = art::protocol(picker, src, self.shell());
+        #[cfg(test)]
+        {
+            self.cover_builds += 1;
+            if self.fail_cover {
+                proto = None;
+            }
+        }
+        self.cover_proto = Some((key, proto));
     }
 
     /// Tape hiss on or off; it starts with the next playing frame and is saved.
@@ -446,6 +517,7 @@ impl App {
             self.searching = typing && !focus_list;
         }
         self.sync_preload();
+        self.sync_cover();
         match self.player.tick() {
             Some(true) => self.on_event(Event::TrackEnded),
             Some(false) => self.on_event(Event::TrackFailed),
@@ -2248,5 +2320,96 @@ mod tests {
         send(&mut a, "new", None);
         assert!(a.art.iter().all(|(i, _)| i != "new"));
         assert!(a.status == "keep" && a.busy);
+    }
+
+    const COVER_ID: &str = "dQw4w9WgXcQ";
+
+    /// A crisp-path app with a track loaded and its cover cached (halfblocks picker in memory).
+    fn crisp_app() -> App {
+        let mut a = art_app(true);
+        a.art_path = art::ArtPath::Crisp;
+        a.picker = Some(Picker::halfblocks());
+        a.queue.set(
+            vec![Track {
+                title: "t".into(),
+                channel: String::new(),
+                id: COVER_ID.into(),
+            }],
+            0,
+        );
+        a.player.now_playing = Some("t".into());
+        a.art.push((COVER_ID.into(), cover()));
+        a
+    }
+
+    #[test]
+    fn notice_shows_once_on_half_blocks_and_off_never_on_crisp() {
+        let toggle = |a: &mut App| {
+            a.status.clear();
+            a.set_thumbnails(false);
+            a.set_thumbnails(true);
+        };
+        let mut a = art_app(false);
+        a.set_thumbnails(true);
+        assert_eq!(
+            a.status,
+            "cover art: half-block mode (no image protocol here)"
+        );
+        toggle(&mut a);
+        assert!(a.status.is_empty());
+        let mut a = art_app(false);
+        a.art_path = art::ArtPath::Off;
+        a.set_thumbnails(true);
+        assert_eq!(a.status, "cover art: off (TERMUSIC_ART=off)");
+        toggle(&mut a);
+        assert!(a.status.is_empty());
+        let mut a = art_app(false);
+        a.art_path = art::ArtPath::Crisp;
+        a.set_thumbnails(true);
+        assert!(a.status.is_empty());
+    }
+
+    #[test]
+    fn off_path_requests_nothing() {
+        let mut a = art_app(true);
+        a.art_path = art::ArtPath::Off;
+        a.request_art(COVER_ID);
+        assert!(a.art_tried.is_empty());
+    }
+
+    #[test]
+    fn cover_protocol_is_built_once_per_key_and_rebuilt_on_shell_change() {
+        let mut a = crisp_app();
+        a.sync_cover();
+        a.sync_cover();
+        assert_eq!(a.cover_builds, 1);
+        assert!(a.cover_proto.as_ref().is_some_and(|(_, p)| p.is_some()));
+        a.cycle_shell(1);
+        a.sync_cover();
+        a.sync_cover();
+        assert_eq!(a.cover_builds, 2);
+        assert_eq!(a.cover_proto.as_ref().unwrap().0.1, a.shell().id);
+    }
+
+    #[test]
+    fn failed_cover_build_is_remembered_not_retried() {
+        let mut a = crisp_app();
+        a.fail_cover = true;
+        a.sync_cover();
+        a.sync_cover();
+        assert_eq!(a.cover_builds, 1);
+        assert!(a.cover_proto.as_ref().is_some_and(|(_, p)| p.is_none()));
+    }
+
+    #[test]
+    fn no_cover_protocol_without_the_crisp_path_or_a_cached_source() {
+        let mut a = crisp_app();
+        a.art.clear();
+        a.sync_cover();
+        assert!(a.cover_proto.is_none());
+        a.art.push((COVER_ID.into(), cover()));
+        a.art_path = art::ArtPath::HalfBlocks;
+        a.sync_cover();
+        assert!(a.cover_proto.is_none() && a.cover_builds == 0);
     }
 }
