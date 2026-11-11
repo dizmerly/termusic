@@ -83,9 +83,9 @@ final class Bar: NSObject {
     func render() {
         let s = connected ? state : nil
         let title = menuTitle(s, connected: connected)
-        item.button?.attributedTitle = NSAttributedString(
-            string: title,
-            attributes: connected ? [:] : [.foregroundColor: NSColor.disabledControlTextColor])
+        // Plain title in the system's menu bar style; a bare attributed title drew in a pill.
+        item.button?.title = title
+        item.button?.appearsDisabled = !connected
         if let s, s.loaded {
             titleItem.title = s.title ?? ""
             channelItem.title = s.channel ?? ""

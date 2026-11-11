@@ -48,9 +48,9 @@ private func state(_ s: String) -> State? { if case .state(let x)? = decodeLine(
 }
 @Test func titles() {
     let a30 = String(repeating: "a", count: 30)
-    #expect(menuTitle(state(stateLine(title: "Hi")), connected: true) == "♪ Hi")
-    #expect(menuTitle(state(stateLine(title: a30 + "a")), connected: true) == "♪ " + a30 + "…")
-    #expect(menuTitle(state(stateLine(title: a30)), connected: true) == "♪ " + a30)
+    #expect(menuTitle(state(stateLine(title: "Hi")), connected: true) == "Hi")
+    #expect(menuTitle(state(stateLine(title: a30 + "a")), connected: true) == a30 + "…")
+    #expect(menuTitle(state(stateLine(title: a30)), connected: true) == a30)
     #expect(menuTitle(state(stateLine(title: "")), connected: true) == "♪")
     #expect(menuTitle(state(real), connected: true) == "♪")
     #expect(menuTitle(nil, connected: true) == "♪")

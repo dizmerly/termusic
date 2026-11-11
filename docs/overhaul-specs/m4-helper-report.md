@@ -7,7 +7,7 @@ Branch `overhaul-4-helper`, cut from `overhaul-3-art` (four commits on top of `9
 - **A control socket** in termusic (`src/remote.rs`). It is a Unix socket at `<config dir>/termusic.sock`, mode 0600. Clients send one JSON object per line; termusic answers with state lines and error lines.
 - **The protocol** (the table is in the README, section "Menu bar helper (macOS)"): playback commands (`play_pause`, `next`, `prev`, `seek`, `toggle_shuffle`, `cycle_loop`), settings (`volume`, `loop`, `shuffle`, `shell`, `thumbnails`, `animations`, `hiss`, `hiss_level`), and `get state`.
 - **State lines** carry the title, channel, id, loaded and paused flags, position (whole seconds), duration, volume, loop, shuffle, the shell id and list, and the settings. They are sent on connect, after each accepted request, and whenever the state changes.
-- **A menu bar helper** (`helper/`, SwiftPM package, executable `TermusicBar`). It shows `♪` and the title in the menu bar, and a menu with title and channel, Play/Pause, Previous, Next, a volume slider, Shuffle, a Loop submenu, and a Settings submenu (Shell, Cover art, Animations, Tape hiss, Hiss level). Quit quits only the helper.
+- **A menu bar helper** (`helper/`, SwiftPM package, executable `TermusicBar`). It shows the title in the menu bar (`♪` when nothing plays), and a menu with title and channel, Play/Pause, Previous, Next, a volume slider, Shuffle, a Loop submenu, and a Settings submenu (Shell, Cover art, Animations, Tape hiss, Hiss level). Quit quits only the helper.
 
 Where the code lives:
 

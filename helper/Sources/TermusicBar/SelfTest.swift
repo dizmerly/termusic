@@ -45,9 +45,9 @@ func runSelfTest() -> Never {
         return nil
     }
     let long = String(repeating: "a", count: 31)
-    check("title short", menuTitle(titled("Hi"), connected: true) == "♪ Hi")
-    check("title 30 kept", menuTitle(titled(String(repeating: "a", count: 30)), connected: true) == "♪ " + String(repeating: "a", count: 30))
-    check("title 31 cut", menuTitle(titled(long), connected: true) == "♪ " + String(repeating: "a", count: 30) + "…")
+    check("title short", menuTitle(titled("Hi"), connected: true) == "Hi")
+    check("title 30 kept", menuTitle(titled(String(repeating: "a", count: 30)), connected: true) == String(repeating: "a", count: 30))
+    check("title 31 cut", menuTitle(titled(long), connected: true) == String(repeating: "a", count: 30) + "…")
     check("title nil state", menuTitle(nil, connected: true) == "♪")
     check("title no title", menuTitle(real_state, connected: true) == "♪")
     check("title disconnected", menuTitle(titled("Hi"), connected: false) == "♪")

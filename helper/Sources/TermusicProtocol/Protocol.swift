@@ -75,5 +75,5 @@ public func socketPath(env: [String: String], home: String) -> String {
 
 public func menuTitle(_ s: State?, connected: Bool) -> String {
     guard connected, let t = s?.title, !t.isEmpty else { return "♪" }
-    return "♪ " + (t.count > 30 ? String(t.prefix(30)) + "…" : t)
+    return (t.count > 30 ? String(t.prefix(30)) + "…" : t)
 }
