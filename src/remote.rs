@@ -300,8 +300,17 @@ async fn client(
         kill: kill.clone(),
     };
     let writer_guard = guard.clone();
+    let writer_kill = kill.clone();
     tokio::spawn(async move {
         let _guard = writer_guard;
+        // Whatever ends the writer (timeout, closed socket) also ends the reader, freeing the slot.
+        struct KillOnDrop(Arc<Notify>);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        let _kill = KillOnDrop(writer_kill);
         let mut next = Some(Ok(state.borrow_and_update().clone()));
         let mut last = None;
         loop {
@@ -947,6 +956,36 @@ mod tests {
             let off = |k| k == key;
             assert_eq!(a.cmd_gate(c, off), Err("disabled".into()), "{c:?}");
             assert_eq!(a.cmd_gate(c, |_| false), Ok(()));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_timeout_frees_the_slot_of_an_idle_client() {
+        let dir = tmp("idle");
+        let sock = dir.join("t.sock");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (st, state) = watch::channel(State::default());
+        let live = serve(UnixListener::bind(&sock).unwrap(), tx, state);
+        let (_r, _w) = connect(&sock).await; // never reads, never writes, never closes
+        let start = std::time::Instant::now();
+        while live.load(Ordering::SeqCst) == 0 {
+            assert!(start.elapsed() < Duration::from_secs(5), "never connected");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // State lines far larger than the socket buffers block the writer until it times out.
+        for i in 0..4 {
+            st.send_replace(State {
+                title: Some(format!("{i}{}", "x".repeat(200_000))),
+                ..State::default()
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        while live.load(Ordering::SeqCst) > 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "idle client kept its slot after the write timeout"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 

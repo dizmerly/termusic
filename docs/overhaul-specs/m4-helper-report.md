@@ -80,7 +80,7 @@ Two sets of checks, with the same content:
 
 ### Not covered by tests
 
-- Rust: the 2 s write timeout (`WRITE_TIMEOUT`) and the per-tick cap (`REMOTE_PER_TICK`). The burst test sends 30 requests, below the cap of 32, so no test reaches it. The accept-error retry in `serve`.
+- Rust: the per-tick cap (`REMOTE_PER_TICK`). The burst test sends 30 requests, below the cap of 32, so no test reaches it. The accept-error retry in `serve`.
 - Swift: `Connection` (socket I/O, reconnect, the 10 per second slider throttle) and the menu (`Bar`). They are not covered by any check; the encoders and decoders are.
 - Live behaviour of the menu (layout, wording, the dimmed title, slider feel).
 
@@ -135,7 +135,7 @@ Checked by the implementing session (Opus) after the review fixes, in a pty with
 Found while reading the code for this report (not changed):
 
 - **Requests can queue without limit.** The request channel into the app (`tx`, in `src/app.rs`) is unbounded. `REMOTE_PER_TICK` limits how fast requests are handled, not how many wait. A client that sends faster than the UI handles them grows the queue.
-- **A client that stops reading keeps its slot.** After a write timeout, the writer task ends, but the reader stays open until the client closes or sends another line. An idle client that neither reads nor writes holds one of the 4 slots indefinitely.
+- **Fixed after the docs were written: a client that stops reading kept its slot.** After a write timeout the writer ended but the reader stayed open, so an idle client held one of the 4 slots indefinitely. The writer now ends the reader whenever it exits; test `a_write_timeout_frees_the_slot_of_an_idle_client` (fails without the fix, passes with it).
 - **`disabled` is checked only for `cmd` requests.** `set shuffle`, `set loop` and `set volume` do not check whether the matching key is disabled in `commands/`. No command is disabled today (`ENABLED` is true everywhere), so this does not show yet. It would matter if a command were ever disabled.
 - **`seek` accepts `5.0`.** The parser accepts any whole-valued number for `secs`, so `{"cmd":"seek","secs":5.0}` works, while `{"set":"volume","value":40.0}` is rejected. The README says send integers; the code is looser for `seek`.
 - **The spec's root `.gitignore` entry was not added.** `helper/.gitignore` already ignores `.build/`, so `helper/.build` stays out of git. The root `.gitignore` was left alone, as asked.
